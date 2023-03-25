@@ -1,7 +1,6 @@
 mpnn_path="/nfs/polizzi/shared/programs/design/ProteinMPNN/"
 
 folder_with_pdbs="parsed_struct/"
-mpnn_path="/nfs/polizzi/jmou/ProteinMPNN"
 path_for_parsed_chains=$folder_with_pdbs"/parsed_pdbs.jsonl"
 path_for_assigned_chains=$folder_with_pdbs"/assigned_pdbs.jsonl"
 path_for_fixed_positions=$folder_with_pdbs"/fixed_pdbs.jsonl"
