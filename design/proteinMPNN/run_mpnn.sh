@@ -1,4 +1,4 @@
-mpnn_path="/nfs/polizzi/jmou/ProteinMPNN"
+mpnn_path="/nfs/polizzi/shared/programs/design/ProteinMPNN/"
 
 folder_with_pdbs="parsed_struct/"
 mpnn_path="/nfs/polizzi/jmou/ProteinMPNN"
