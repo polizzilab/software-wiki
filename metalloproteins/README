@@ -1,1 +1,5 @@
 Files for the lanthanide-binding proteins project
+
+fetch_CA_binding_motif.py: Extracts calcium and residues around it
+cluster_pdbs.py: Clusters the fragments with calcium
+center_pdbs.py: Sets calcium coordinates to origin
