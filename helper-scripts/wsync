@@ -1,0 +1,46 @@
+#!/bin/bash
+#
+# Helper script by jchang to sync files between my computer and workstation
+#
+# Usage:
+#   wsync [up|down] DIRECTORY
+# 
+# Examples:
+#   wsync down .
+#       Copies the current directory from the workstation onto my computer
+#   wsync up .
+#       Copies the current directory from my computer onto the workstation
+#   wsync up path/to/subdir
+#       Copies everything under path/to/subdir from my computer onto the workstation
+#
+# Last modified 2023-08-18
+
+
+# ${base_dir} is the directory on my local computer where I store files on the workstation.
+# It has the same directory structure! i.e.
+#       ~/nterm/clps-redesign                   on the workstation corresponds to
+#       ${base_dir}/nterm/clps-redesign         on my own computer.
+
+base_dir="/home/jeffjar/lab/polizzi-lab/"
+
+if [ $# -ne 2 ]; then
+    echo 'Usage: wsync [up|down] DIRECTORY'
+    exit 1
+fi
+
+path=$(readlink -f $2)
+
+if [[ "${path}" == "${base_dir}"* ]]; then
+    relpath="${path#"${base_dir}"}"
+    if [[ $1 == 'up' ]]; then
+        rsync -r $path/ workstation:$relpath
+    elif [[ $1 == 'down' ]]; then
+        rsync -r workstation:$relpath/ $path
+    else
+        echo 'Usage: wsync [up|down] DIRECTORY'
+        exit 1
+    fi
+else
+    echo "Error: ${path} is not a subdirectory of ${base_dir}"
+    exit 1
+fi
