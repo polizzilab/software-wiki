@@ -1,0 +1,137 @@
+# Jeffrey's pymolrc
+
+
+### KEYBOARD SHORTCUTS
+
+# F1 sets up clipping planes
+cmd.set_key('F1', lambda: cmd.do('clip slab, 12'))
+
+# F2 colors by atomic (red oxygen, blue nitrogen, etc.)
+cmd.set_key('F2', lambda: cmd.do('color atomic, not (elem C)'))
+
+# F9, F10, F11 color the current selection
+cmd.set_key('F9', lambda: cmd.do('color magenta, sele and elem C'))
+cmd.set_key('F10', lambda: cmd.do('color tv_green, sele and elem C'))
+cmd.set_key('F11', lambda: cmd.do('color cyan, sele and elem C'))
+
+# F12: Resets all colors to grey
+cmd.set_key('F12', lambda: cmd.do('color grey70, all; color atomic, not (elem C);'))
+
+# CTRL-K ("sticK") shows all sticks and a slightly transparent main-chain cartoon. I find that the transparency helps to see the positions of main chain atoms.
+cmd.set_key('CTRL-K', lambda: cmd.do('set cartoon_transparency, 0.2; show sticks, enabled; hide sticks, elem h and neighbor elem c'))
+
+# Alt-H ("Hydrogen") shows hydrogen bonds between all currently enabled atoms
+cmd.set_key('ALT-H', lambda: cmd.do('delete hbonds; distance hbonds, enabled, enabled, 3.4, mode=2; set label_size, -0.4'))
+
+# Alt-Y ("hYdrogen") shows hydrogen bonds between *current selection* and everything else currently enabled
+cmd.set_key('ALT-Y', lambda: cmd.do('delete hbonds; distance hbonds, sele and enabled and not elem H, not sele and enabled and not elem H, 3.4, mode=2; set label_size, -0.4'))
+
+# CTRL-P ("Pocket") colors the selection megenta, and colors in orange any residues within 4.5A of the current selection
+cmd.set_key('CTRL-P', lambda: cmd.do('color magenta, sele and elem c; show sticks, br. all within 4.5 of sele; color tv_orange, (byres all near_to 4.5 of sele) and elem c; hide sticks, elem h and neighbor elem c'))
+
+# CTRL-D ("van Der mer") runs my vdM viewing script for combs output pdbs
+cmd.set_key('CTRL-D', lambda: cmd.do('load /home/jeffjar/bin/pymol_vdm_vis_cartoon.pml'))
+
+# CTRL-W ("Wizard measurement") opens the measurement wizard
+cmd.set_key('CTRL-W', lambda: cmd.do('wizard measurement'))
+
+# CTRL-L ("Label") labels residue names
+cmd.set_key('CTRL-L', lambda: cmd.do('label name CA, "%s-%s"% (resn,resi)')) #' ; set label_size, -0.4'))
+
+# CTRL-N ("Nterm") colors Nterm binding motifs the way I like
+cmd.set_key('CTRL-N', lambda: cmd.do('show sticks; show cartoon; set cartoon_transparency, 0.2; color cyan, chain L; color olive, chain L and resi 1 and (not name N+CA+C+O+H1+H2+H3); color tv_orange, chain X; color green, chain A; color atomic, not (elem C)'))
+
+# CTRL-O ("Orient") to orient around currently enabled object
+cmd.set_key('ALT-O', lambda: cmd.orient('enabled'))
+
+# Left and Right arrow keys can quickly scroll through objects in the object list.
+python
+def change_enabled(dx):
+    enabled_objs = cmd.get_names(enabled_only=1, type="objects")
+    if len(enabled_objs) == 0:
+        return
+    curr = enabled_objs[0]
+
+    all_objs = cmd.get_names(enabled_only=0, type="objects")
+    i = all_objs.index(curr)
+    if not (0 <= i + dx < len(all_objs)):
+        return
+    new = all_objs[i + dx]
+    cmd.disable(curr)
+    cmd.enable(new)
+python end
+cmd.set_key('left', lambda: change_enabled(-1))
+cmd.set_key('right', lambda: change_enabled(1))
+
+
+### VISUAL SETTINGS
+
+# This makes the cartoon slightly skinnier so it's less obstrusive
+set cartoon_oval_length, 0.8
+set cartoon_rect_length, 1
+
+# This makes spheres a reasonable size
+set sphere_scale, 0.5
+
+# This sets two digits of precision for any labeled distances if you want
+# set label_distance_digits, 2
+
+# This makes dotted lines for H-bonds more dotted
+set dash_gap, 0.25
+
+# These change the label settings to be a little easier to read.
+set label_font_id, 7
+set label_size, -0.5
+ # in Angstroms
+set label_color, white
+set label_outline_color, grey
+set label_position, [0, 0, 2]
+
+# This is for the B-factor ellipsoids (rare use case)
+set ellipsoid_transparency, 0.2
+set ellipsoid_quality, 5
+
+
+# The defaults below are from Gaudet lab and modified by JC
+#
+#Settings that I use as starting preferences for figure-making
+#reduces unnecessarily busy shadows
+set ray_shadow, off
+#Without shadows I tend to increase specular_intensity (default 0.5) makes things look shiny
+set specular_intensity, 0.5
+#Adding one more light from default=2
+set light_count, 3
+#Increasing the direct camera light from default=0.45
+set direct, 0.45
+#Increasing the moveable light sources from default=0.45
+set reflect, 0.45
+#Move the light to top left of the window using the 3-button lights mouse mode, and shift + middle button. Corresponds to:
+set light, [ 4.0, -2.5, -1.0 ]
+#From 0-1, modify as needed (default 1.0)
+set fog, 1.0
+#From 0-1 (0 is front, 1 is back of slab), modify as needed (default 0.45)
+set fog_start, 0.6
+#These next lines are my favorites for nucleic acid (cartoon_ring_model default is 0 showing no rings)
+set cartoon_ring_mode, 3
+#Rings that are not filled by setting to 1 (default is -1, i.e. controlled by cartoon_transparency) 
+set cartoon_ring_transparency, 1
+#Sphere settings (default is 1)
+set sphere_quality, 2
+#Turn off the display of double bonds in sticks mode (default is on)
+set valence, off
+
+#Resetting colors Earths
+set_color slate, [0.3, 0.35, 0.9]
+set_color forest, [0.3, 0.6, 0.3]
+set_color yellow, [1.00, 0.75, 0.10]
+set_color ruby, [0.7, 0.3, 0.2]
+set_color grey, [0.7, 0.7, 0.7]
+#Resetting colors Jewels
+set_color cyan, [0.1, 0.75, 1.0]
+set_color green, [0, 0.7, 0.1]
+set_color magenta, [0.7, 0.10, 0.8]
+#Resetting additional common colors to more appealing values
+set_color tv_green, [0, 0.85, 0.1]
+set_color lightmagenta, [0.8, 0.10, 0.9]
+set_color carbon, [0.0, .8, 0.1]
+set_color salmon, [1.0, 0.5, 0.3]
