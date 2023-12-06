@@ -2,7 +2,8 @@
 Analyze RFDiffusion outputs
 
 Input:
-    .pdb (and .trb) of RFDiffusion generated scaffold
+    a single .pdb (and .trb) of RFDiffusion generated scaffold
+    or entire directory of .pdb and .trb files
 Optional inputs:
     .log file of the RFDiffusion output
 Output:
@@ -236,8 +237,8 @@ def analyze_rfdiffusion_output(
 
     Returns: 
         dict with the following fields
-            pdb_path
-            pdb_stem
+            scaffold_path
+            scaffold_stem
             overall_plddt
             motif_plddt
             seq                     (only if log_filename is provided)
@@ -278,7 +279,7 @@ def analyze_rfdiffusion_output(
     for chain in designed_chains:
         scaffold_chain_ca = scaffold.select(f'chain {chain} name CA')
         if scaffold_chain_ca is None or len(scaffold_chain_ca) == 0:
-            raise ValueError(f'Chain {chain} not found in {scaffold_path}')
+            raise Exception(f'Chain {chain} not found in {scaffold_path}')
         ca_coords = scaffold_chain_ca.getCoords()
 
         chain_dict = info_dict['chains'][chain]
@@ -293,10 +294,60 @@ def analyze_rfdiffusion_output(
 
     return info_dict
 
+def analyze_rfdiffusion_outputs_dir(
+        scaffolds_dir : str,
+        calculate_dssp : bool = True,
+        log_filename : str = None,
+        output_json : str = None,
+        designed_chains : list = None
+        ):
+    '''
+    This is same as `analyze_rfdiffusion_output` except it takes an entire *directory* of
+    .pdb and .trb files as an input. If you pass a .log file, please make sure it is the .log
+    file outputted by the RFDiffusion script when it generated that entire directory.
+    '''
+    if not Path(scaffolds_dir).is_dir():
+        raise Exception(f'scaffolds_dir should be a directory: {scaffolds_dir}')
+
+    scaffold_paths = [str(p) for p in Path(scaffolds_dir).glob('*.pdb')]
+    scaffold_paths.sort()
+    if len(scaffold_paths) == 0:
+        raise Exception(f'no pdb files found in directory: {scaffolds_dir}')
+    
+    # Look at each of the scaffold pdbs in the dir
+    out = []
+    for scaffold_path in scaffold_paths:
+        out.append(analyze_rfdiffusion_output(scaffold_path, 
+                                              calculate_dssp=calculate_dssp, 
+                                              log_filename=log_filename, 
+                                              designed_chains=designed_chains))
+
+    # Add info from log file if present
+    if log_filename is not None:
+        log_dict = extract_info_from_log(log_filename)
+        for d in out:
+            d.update(log_dict.get(d['scaffold_stem'], dict()))
+
+    if output_json is not None:
+        Path(output_json).parent.mkdir(exist_ok=True, parents=True)
+        with open(output_json, 'w') as f:
+            json.dump(out, f, indent=2)
+
+    return out
+
 if __name__=='__main__':
+    # Analyze a single .pdb and .trb file
     analyze_rfdiffusion_output(
         'rfdiffusion_output/pdb/3dnj_0.pdb',
         log_filename='rfdiffusion_output/rfdiff.log',
         output_json='rfdiffusion_output/3dnj_0.json',
+        designed_chains=['A']
+    )
+
+    # Analyze an entire directory of .pdb and .trb files
+    analyze_rfdiffusion_outputs_dir(
+        'rfdiffusion_output/pdb/',
+        log_filename='rfdiffusion_output/rfdiff.log',
+        output_json='rfdiffusion_output/3dnj.json',
         designed_chains=['A']
     )
