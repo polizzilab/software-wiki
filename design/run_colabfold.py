@@ -17,7 +17,7 @@ def run_colabfold(input_file : str,
                   flags_list : list = [],
                   gpu_id : int = None,
                   colabfold_exec : str = COLABFOLD_EXEC,
-                  verbose : bool = False):
+                  verbose : int = 0):
     '''
     Parameters:
         input_file          .fasta of sequences (or directory, .a3m file, etc.)
@@ -28,7 +28,7 @@ def run_colabfold(input_file : str,
     Optional parameters:
         gpu_id              if provided, runs on the GPU with this id
         colabfold_exec      what executable to run
-        verbose             whether to show what commmand you're running and the output
+        verbose             if > 1 it shows the whole output of the colabfold script
 
     Returns: 
         None
@@ -38,7 +38,7 @@ def run_colabfold(input_file : str,
         gpu_env_vars["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     cmd_parts = [ str(colabfold_exec), str(input_file), str(output_dir) ] + flags_list
 
-    if verbose:
+    if verbose > 1:
         print(' '.join(cmd_parts))
         subprocess.run(cmd_parts, env=gpu_env_vars)
     else:
@@ -49,4 +49,4 @@ if __name__=='__main__':
                   'colabfold_output/pdb',
                   ['--msa-mode', 'single_sequence'],
                   gpu_id=0,
-                  verbose=True)
+                  verbose=2)
