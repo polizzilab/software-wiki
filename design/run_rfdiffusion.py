@@ -5,7 +5,10 @@ Input: a dictionary of flags; see full options at: https://github.com/RosettaCom
 Output: a directory of pdbs
 
 Notes:
-🎵 probe does not know about segment ID's, so make sure your pdb file has unique chains
+🎵 For reproducibility, it is helpful to save the inference_flags that you passed in to the model.
+🎵 Since it can be finnicky to calculate the exact "contigs string", it is helpful to have a separate
+   "prepare rfdiffusion inputs" script to form these out of gap length, residue numbers, etc.
+
 
 - jchang 2023-12-05
 '''
