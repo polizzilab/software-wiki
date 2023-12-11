@@ -68,6 +68,9 @@ def run_colabfold_parallel(input_dir_of_fastas : str,
         if verbose == 0:
             # show the progress bar
             iterable = tqdm(iterable, total=len(args_list))
+        if verbose == 1:
+            # give a summary
+            print(f'Found {len(args_list)} fasta files; distributing to {num_processes} workers')
         for _ in iterable:
             pass
 
