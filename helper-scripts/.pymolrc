@@ -39,7 +39,11 @@ cmd.set_key('CTRL-W', lambda: cmd.do('wizard measurement'))
 cmd.set_key('CTRL-L', lambda: cmd.do('label name CA, "%s-%s"% (resn,resi)')) #' ; set label_size, -0.4'))
 
 # CTRL-N ("Nterm") colors Nterm binding motifs the way I like
-cmd.set_key('CTRL-N', lambda: cmd.do('show sticks; show cartoon; set cartoon_transparency, 0.2; color cyan, chain L; color olive, chain L and resi 1 and (not name N+CA+C+O+H1+H2+H3); color tv_orange, chain X; color green, chain A; color atomic, not (elem C)'))
+cmd.set_key('CTRL-N', lambda: cmd.do('show sticks; show cartoon; set cartoon_transparency, 0.2; color cyan, chain L; color olive, chain L and resi 1 and (not name N+CA+C+O+H1+H2+H3); color tv_orange, chain X; color green, chain A; color grey, chain A and name C+CA; color atomic, not (elem C); hide sticks, elem h and neighbor elem c'))
+
+# CTRL-B ("motif-B") for motifs
+cmd.set_key('CTRL-B', lambda: cmd.do('show sticks; show cartoon; set cartoon_transparency, 0.2; color cyan, chain Y; color green, chain X; color grey, chain X and name C+CA; color atomic, not (elem C); hide sticks, elem h and neighbor elem c'))
+
 
 # CTRL-O ("Orient") to orient around currently enabled object
 cmd.set_key('ALT-O', lambda: cmd.orient('enabled'))
@@ -95,18 +99,19 @@ set ellipsoid_quality, 5
 # The defaults below are from Gaudet lab and modified by JC
 #
 #Settings that I use as starting preferences for figure-making
-#reduces unnecessarily busy shadows
-set ray_shadow, off
+#reduces unnecessarily busy shadows -- turned on b/c Nick likes shadows
+# set ray_shadow, off
+#
 #Without shadows I tend to increase specular_intensity (default 0.5) makes things look shiny
 set specular_intensity, 0.5
-#Adding one more light from default=2
-set light_count, 3
+#Adding one more light from default=2 -- reduced to 1 b/c Nick likes less lights
+set light_count, 1
 #Increasing the direct camera light from default=0.45
 set direct, 0.45
 #Increasing the moveable light sources from default=0.45
 set reflect, 0.45
 #Move the light to top left of the window using the 3-button lights mouse mode, and shift + middle button. Corresponds to:
-set light, [ 4.0, -2.5, -1.0 ]
+#set light, [ 4.0, -2.5, -1.0 ]
 #From 0-1, modify as needed (default 1.0)
 set fog, 1.0
 #From 0-1 (0 is front, 1 is back of slab), modify as needed (default 0.45)
