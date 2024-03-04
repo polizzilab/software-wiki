@@ -1,0 +1,94 @@
+<ROSETTASCRIPTS>
+   <SCOREFXNS>
+      <ScoreFunction name="beta" weights="beta">
+         <Reweight scoretype="atom_pair_constraint" weight="1"/>
+      </ScoreFunction>
+      <ScoreFunction name="beta_1" weights="beta"> can update with new scorefunction if necessary
+         <Reweight scoretype="aa_composition" weight="1" />
+         <Reweight scoretype="netcharge" weight="1.0" />
+         <Reweight scoretype="atom_pair_constraint" weight="1"/>
+         aa_composition_setup_file="no_met_thr_ser_asn.comp"
+         <Set netcharge_setup_file="/nfs/polizzi/jmou/frog/combs_runs/helices/rosetta_templates/netcharge.charge" />
+      </ScoreFunction>
+   </SCOREFXNS>
+   <RESIDUE_SELECTORS>
+   </RESIDUE_SELECTORS>
+   <TASKOPERATIONS>
+      <InitializeFromCommandline name="ifcl"/>
+      <ReadResfile name="resfile"/>
+      <ExtraRotamersGeneric name="extrachi" ex1="1" ex2="1"
+                       ex1_sample_level="1" ex2_sample_level="1"
+                       extrachi_cutoff="14"/> sample extra rotamers - if it has at least 14 neighbors, apply the extra rotamers. if you increase the number, the cutoff becomes more stringent
+                       the slow part of rosetta is the rotamer sampling - speed this up by 
+      <IncludeCurrent name="include_curr" />
+   </TASKOPERATIONS>
+   <FILTERS>
+      <PackStat name="pstat" confidence="0" threshold="0" repeats="10"/>
+      <PackStat name="pstat_mc" threshold="0" repeats="10"/>
+      <ScoreType name="total_score_1" scorefxn="beta_1" score_type="total_score"
+               threshold="0"/> 
+    </FILTERS>
+   <MOVERS>
+      <!--ConstraintSetMover name="atomic" cst_file="CONSTRAINT_FILE" get rid of the constraints for now/-->
+      <PackRotamersMover name="pack" scorefxn="beta_1"
+                     task_operations="ifcl,resfile,include_curr,extrachi"/>
+      <PackRotamersMover name="pack_fast" scorefxn="beta_1"
+                     task_operations="ifcl,resfile,include_curr"/>
+      <MinMover name="min_bb" scorefxn="beta" tolerance="0.0000001" max_iter="1000" chi="false" bb="true">
+         <MoveMap name="map_bb"> movemaps allow us to set which DoF are fixed in minimization
+            <Span begin="BB_START" end="BB_END" bb="true" chi="false" /> only backbone 
+            <Span begin="LIG_START" end="999" bb="false" chi="false"/> fix backbone and sidechain
+         </MoveMap>
+      </MinMover>
+      <Idealize name="idealize"/> idealize the bond angles and lengths - not used? use if splicing in the loop
+      <MinMover name="min_sc" scorefxn="beta" tolerance="0.0000001" max_iter="1000" chi="true" bb="false">
+         <MoveMap name="map_sc">
+            <Span begin="BB_START" end="BB_END" bb="false" chi="true" /> change to be number of residues in protein
+            <Span begin="LIG_START" end="999" bb="false" chi="false"/> don't move ligand itself
+         </MoveMap>
+      </MinMover>
+      <MinMover name="min_sc_bb" scorefxn="beta" tolerance="0.0000001" max_iter="1000" chi="true" bb="true">
+         <MoveMap name="map_sc_bb">
+            <Span begin="BB_START" end="BB_END" bb="true" chi="true" />
+            <Span begin="LIG_START" end="999" bb="false" chi="false"/>
+         </MoveMap>
+      </MinMover>
+      <ParsedProtocol name="parsed_pack_fast" > this step actually does sequence redesign 
+         <Add mover_name="pack_fast"/> 
+         <Add mover_name="min_bb"/>
+      </ParsedProtocol>
+      <ParsedProtocol name="parsed_pack" >
+         <Add mover_name="pack"/>
+         <Add mover_name="min_bb"/>
+         <Add mover_name="min_sc"/>
+      </ParsedProtocol>
+      <GenericMonteCarlo name="pack_mc" preapply="0" trials="3" temperature="0.03"
+                          filter_name="pstat_mc" sample_type="high" mover_name="parsed_pack"> packing optimization
+            <Filters>
+               <AND filter_name="total_score_1" temperature="15" sample_type="low"/> energy optimization 
+            </Filters>
+      </GenericMonteCarlo>
+      <GenericMonteCarlo name="pack_fast_mc" preapply="0" trials="2" temperature="0.03"
+                          filter_name="pstat_mc" sample_type="high" mover_name="parsed_pack_fast">
+            <Filters>
+               <AND filter_name="total_score_1" temperature="15" sample_type="low"/> is this needed?
+            </Filters>
+      </GenericMonteCarlo>
+     FavorSequenceProfile name="favor_pmpnn_pssm" scorefxns="beta" weight="1.0" scaling="none" 
+                    pssm="PSSM_PATH"
+                    
+   </MOVERS>
+   <APPLY_TO_POSE>
+   </APPLY_TO_POSE>
+   <PROTOCOLS>
+      Add mover_name="favor_pmpnn_pssm"
+      Add mover="atomic"/> 
+      Add mover="idealize"/> don't add idealize for now
+      <Add mover_name="parsed_pack_fast"/>
+      <Add mover_name="pack_fast_mc"/>
+      <Add mover_name="pack_mc"/>
+      <Add mover_name="min_sc_bb"/>
+      <Add filter_name="pstat"/>
+   </PROTOCOLS>
+   <OUTPUT scorefxn="beta_1"/> refer to the score function defined in SCOREFXNS above
+</ROSETTASCRIPTS>
