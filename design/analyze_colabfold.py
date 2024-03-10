@@ -64,7 +64,7 @@ def compute_binding_shell_RMSD(pdb,
                                af2_pdb, 
                                ligand_chain : str ='L',
                                water_chain : str ='W',
-                               rmsd_before_alignment: bool = False):
+                               calc_rmsd_before_alignment: bool = False):
     '''
     Compute the RMSD between the N CA C O atoms of the binding site atoms of a designed protein and the same atoms of the folded protein.
     The binding site is calculated as all residues with heavy atoms within 5A of the ligand.
@@ -101,9 +101,11 @@ def compute_binding_shell_RMSD(pdb,
     # calculate rmsd
     rmsd = pr.calcRMSD(bs_coords, bs_coords_af2)
 
+    if calc_rmsd_before_alignment:
+        return rmsd_before_alignment, af2_pdb
 
-
-    return rmsd, af2_pdb
+    else:
+        return rmsd, af2_pdb
 
 
 def compute_first_shell_RMSD(pdb, 
