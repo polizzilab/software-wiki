@@ -63,7 +63,8 @@ def compute_RMSD(native_protein, designed_protein):
 def compute_binding_shell_RMSD(pdb, 
                                af2_pdb, 
                                ligand_chain : str ='L',
-                               water_chain : str ='W'):
+                               water_chain : str ='W',
+                               rmsd_before_alignment: bool = False):
     '''
     Compute the RMSD between the N CA C O atoms of the binding site atoms of a designed protein and the same atoms of the folded protein.
     The binding site is calculated as all residues with heavy atoms within 5A of the ligand.
@@ -73,6 +74,7 @@ def compute_binding_shell_RMSD(pdb,
         pdb: prody protein object, designed protein
         af2_pdb: prody protein object, folded protein
         ligand_sele: str, prody selection string for the ligand
+        rmsd_before_alignment: bool, whether to return the rmsd before alignment on binding shell residues; turn on if you have already globally aligned by CA and want the rmsd before alignment. 
     Outputs:
         rmsd: float, RMSD between the binding site atoms of the designed and folded proteins
         af2_pdb: prody protein object, re-aligned by the binding site residues
@@ -90,11 +92,17 @@ def compute_binding_shell_RMSD(pdb,
         # alternatively, could use selection "protein and (resnum {bs_resnums}) and name {name}"
     bs_coords = np.array(bs_coords).reshape(-1,3) # shape 4N, 3
     bs_coords_af2 = np.array(bs_coords_af2).reshape(-1,3) # shape 4N, 3
-    # calculate rmsd
-    rmsd = pr.calcRMSD(bs_coords, bs_coords_af2)
+    # calculate rmsd before alignment
+    rmsd_before_alignment = pr.calcRMSD(bs_coords, bs_coords_af2)
 
     # re-align protein by binding site residues
     pr.calcTransformation(bs_coords_af2, bs_coords).apply(af2_pdb)
+
+    # calculate rmsd
+    rmsd = pr.calcRMSD(bs_coords, bs_coords_af2)
+
+
+
     return rmsd, af2_pdb
 
 
