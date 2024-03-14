@@ -13,13 +13,13 @@ def check_for_hb(a1, a2):
     # backbone atoms are named N, CA, C, O and have the same chid
     names = (a1.getName(), a2.getName())
     chids = (a1.getChid(), a2.getChid())
-    if names in list(itertools.product(('O','N'), repeat=2)): 
+    if names in list(itertools.product(('O','N','S'), repeat=2)): 
         # if the chains do not contain W, return false 
         if not 'W' in chids:
             return False
     # finally, check if the bond is between O, N 
     l = (a1.getName()[0],a2.getName()[0])
-    if l in list(itertools.product(('O','N'), repeat=2)):
+    if l in list(itertools.product(('O','N','S'), repeat=2)):
         return True
     return False 
 
