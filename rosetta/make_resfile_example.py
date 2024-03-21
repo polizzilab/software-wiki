@@ -15,7 +15,7 @@ p = pr.parsePDB('example_inputs/0_pose8_en_0p45_no_CG_top1_of_5.pdb')
 resfile_output_path = 'example_inputs/0_pose8_en_0p45_no_CG_top1_of_5_resfile.txt' 
 
 # text file with one residue per line, "chain resnum" e.g. "A 10" describing vdM residues
-vdm_residues_path = 'example_inputs/0_pose8_en_0p45_no_CG_top1_of_5_vdms_residues.txt'
+vdm_residues_path = 'example_inputs/0_pose8_en_0p45_no_CG_top1_of_5_vdm_residues.txt'
 
 write_resfile(p, 
               alpha=9, 
