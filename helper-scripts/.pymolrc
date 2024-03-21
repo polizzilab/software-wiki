@@ -9,6 +9,9 @@ cmd.set_key('F1', lambda: cmd.do('clip slab, 12'))
 # F2 colors by atomic (red oxygen, blue nitrogen, etc.)
 cmd.set_key('F2', lambda: cmd.do('color atomic, not (elem C)'))
 
+# F5 orients to the selection
+cmd.set_key('F5', lambda: cmd.orient('sele'))
+
 # F9, F10, F11 color the current selection
 cmd.set_key('F9', lambda: cmd.do('color magenta, sele and elem C'))
 cmd.set_key('F10', lambda: cmd.do('color tv_green, sele and elem C'))
@@ -18,7 +21,9 @@ cmd.set_key('F11', lambda: cmd.do('color cyan, sele and elem C'))
 cmd.set_key('F12', lambda: cmd.do('color grey70, all; color atomic, not (elem C);'))
 
 # CTRL-K ("sticK") shows all sticks and a slightly transparent main-chain cartoon. I find that the transparency helps to see the positions of main chain atoms.
+# ALT-S ("Stick") is a more ergonmic keyboard shortcut.
 cmd.set_key('CTRL-K', lambda: cmd.do('set cartoon_transparency, 0.2; show sticks, enabled; hide sticks, elem h and neighbor elem c'))
+cmd.set_key('ALT-S', lambda: cmd.do('set cartoon_transparency, 0.2; show sticks, enabled; hide sticks, elem h and neighbor elem c'))
 
 # Alt-H ("Hydrogen") shows hydrogen bonds between all currently enabled atoms
 cmd.set_key('ALT-H', lambda: cmd.do('delete hbonds; distance hbonds, enabled, enabled, 3.4, mode=2; set label_size, -0.4'))
@@ -37,6 +42,9 @@ cmd.set_key('CTRL-W', lambda: cmd.do('wizard measurement'))
 
 # CTRL-L ("Label") labels residue names
 cmd.set_key('CTRL-L', lambda: cmd.do('label name CA, "%s-%s"% (resn,resi)')) #' ; set label_size, -0.4'))
+
+# CTRL-G ("desiGn") shows sticks for viewing a design
+cmd.set_key('CTRL-G', lambda: cmd.do('show sticks, enabled; show cartoon, enabled; set cartoon_transparency, 0.2; color aquamarine, chain A and enabled; color orange, chain L and enabled; color atomic, not (elem C) and enabled; hide sticks, elem h and neighbor elem c and enabled'))
 
 # CTRL-N ("Nterm") colors Nterm binding motifs the way I like
 cmd.set_key('CTRL-N', lambda: cmd.do('show sticks; show cartoon; set cartoon_transparency, 0.2; color cyan, chain L; color olive, chain L and resi 1 and (not name N+CA+C+O+H1+H2+H3); color tv_orange, chain X; color green, chain A; color grey, chain A and name C+CA; color atomic, not (elem C); hide sticks, elem h and neighbor elem c'))
@@ -67,6 +75,11 @@ python end
 cmd.set_key('left', lambda: change_enabled(-1))
 cmd.set_key('right', lambda: change_enabled(1))
 
+python
+@cmd.extend
+def ww(filepath):
+    cmd.do('load http://npl1.in.hwlab:8000/'+filepath)
+python end
 
 ### VISUAL SETTINGS
 
@@ -140,3 +153,4 @@ set_color tv_green, [0, 0.85, 0.1]
 set_color lightmagenta, [0.8, 0.10, 0.9]
 set_color carbon, [0.0, .8, 0.1]
 set_color salmon, [1.0, 0.5, 0.3]
+
