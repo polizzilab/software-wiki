@@ -50,7 +50,6 @@ def make_constraints(
     Constraints are NOT written for:
         - hydrogen bonds within the same residue
         - hydrogen bonds where *both* heavy atoms are backbone atoms (atom names N, CA, C, O) for instance i+4 helix h-bonding
-        - hydrogen bonds with S 
         - hydrogen bonds that are missing an H (constraint will only be written if there is a hydrogen attached to one heavy atom within Hbonding distance)
 
     Inputs:

@@ -1,5 +1,5 @@
 import prody as pr
-from constraints import make_constraints, pymol_visualize_constraints_print
+from calculate_constraints import make_constraints, pymol_visualize_constraints_print
 
 pdb_path = 'example_inputs/0_pose8_en_0p45_no_CG_top1_of_5.pdb'
 
