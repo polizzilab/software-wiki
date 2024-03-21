@@ -52,9 +52,9 @@ NEG='DE'
 NONCHARGED = 'ACFGHILMNPQSTVWY'
 
 CHARGE_RES_DICT = {
-    int(-1): list(NEG+POLAR), # remove pos charged - K and R
-    int(0): list(NONCHARGED),
-    int(1): list(POS+POLAR)
+    int(-1): NEG+POLAR, # remove pos charged - K and R
+    int(0): NONCHARGED,
+    int(1): POS+POLAR
 }
 
 
@@ -101,7 +101,7 @@ def write_resfile(p: pr.AtomGroup,
     resindices_exposed, resindices_intermediate, resindices_buried = partition_res_by_burial(pdb_ala, alpha=alpha, ahull_ca=None, ahull_cb=None, 
                                                                                             assign_intermediate_by_distance=False,
                                                                                             distance_threshold=distance_threshold,)
-    
+
     # for each resindex, add preferred residues for each burial state
     for r in resindices_exposed:
         resfile_dict[r].append(BURIAL_RES_DICT['exposed'])
@@ -109,7 +109,6 @@ def write_resfile(p: pr.AtomGroup,
         resfile_dict[r].append(BURIAL_RES_DICT['intermediate'])
     for r in resindices_buried:
         resfile_dict[r].append(BURIAL_RES_DICT['buried'])
-
 
     # if topo_charge_dict_path is provided, read it
     if topo_charge_dict_path:
@@ -140,19 +139,19 @@ def write_resfile(p: pr.AtomGroup,
                 vdm_residues.append((chain, int(resnum))) 
 
     # write the resfile
+    # iterate the protein-only residues
+    p_protein = p.protein.toAtomGroup()
     with open(resfile_output_path, 'w') as f:
         f.write(f'{vdm_rosetta_rotamer} \n') 
         f.write('start \n')
         f.write(f'{ligand_resnum} {ligand_chain} NATRO \n') # don't move the ligand 
-        for res in p.iterResidues():
-            if res.getChid() == ligand_chain:
-                continue
+        for res in p_protein.iterResidues():
             if (res.getChid(), res.getResnum()) in vdm_residues: # skip the vdM residues
                 continue 
             if (res.getChid(), res.getResnum()) in designable_residues:
                 # get the preferred residues for this resindex
                 preferred_res = resfile_dict[res.getResindex()]
-                # get the intersection of the two strings in preferred_res list
+                # take the intersection of the preferred residues
                 preferred_res = ''.join(list(set.intersection(*map(set, preferred_res))))
                 f.write(f'{res.getResnum()} {res.getChid()} PIKAA {preferred_res} \n')
             else:
