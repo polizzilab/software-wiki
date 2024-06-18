@@ -20,6 +20,13 @@ mkdir -p bunsalyze_output
 ./bunsalyze bunsalyze_input/3ry2_A_H.pdb bunsalyze_input/BTN_dons_and_accs.txt \
     > bunsalyze_output/3ry2_buns.json
 
+# You can use flags to use COMBSian clash detection and burial detection, instead of probe/freesasa
+# This may take a while to get going, because COMBS takes a long time to import.
+./bunsalyze bunsalyze_input/3ry2_A_H.pdb bunsalyze_input/BTN_dons_and_accs.txt \
+    --use_alpha_hull --use_combsian_contact --vdW_tolerance 0.15 \
+    --ligand_resname BTN --ligand_params bunsalyze_input/BTN.params \
+    > bunsalyze_output/3ry2_buns_combsian.json
+
 # The script also works for a directory containing many .pdb files
 # The -j flag will parallelize
 # The output of this is a *.jsonl* (json lines format)
@@ -27,5 +34,10 @@ mkdir -p bunsalyze_output
     bunsalyze_input/OBI_dons_accs.txt \
     --run_reduce \
     --reduce_output_dir bunsalyze_output/laserfrogs_pdb_H/ \
+    --use_alpha_hull \
+    --freesasa_output_dir bunsalyze_output/laserfrogs_burial/ \
+    --use_combsian_contact \
+    --probe_output_dir bunsalyze_output/laserfrogs_contacts/ \
+    --ligand_resname OBI --ligand_params bunsalyze_input/OBI.params \
     -j 4 \
     > bunsalyze_output/laserfrogs.jsonl

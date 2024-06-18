@@ -1,9 +1,9 @@
-#!/usr/bin/env python
+#!/nfs/polizzi/jchang/.conda/envs/mytorch/bin/python
 '''
 Analyze buns and clashes in a pdb file (or list of pdb files) and print results to stdout as .jsonl
     1. (optional) run reduce to add H's
-    2. Run probe to find hbonds and clashes
-    3. Run freesasa to determine solvent-accessible surface area of each atom
+    2. Run probe or combs2.design.contacts to find hbonds and clashes
+    3. Run freesasa or combs2.design.convex_hull to determine burial of each atom
     4. Analyze buns / clashing of all atoms; calculate buns energy
 
 A few notes:
@@ -17,9 +17,8 @@ A few notes:
 
 --- HOW BUNS ENERGY IS CALCULATED ---
 
-- Each buried side chain donor/acceptor is assigned a "hydrogen bonding capacity" based on how frequently
-  H-bonding partners are observed in the PDB (see SC_HB_CAPACITY). The penalty is the capacity minus
-  the number of H-bonds, capped at 0:
+- Each buried side chain donor/acceptor is assigned a "hydrogen bonding capacity" (see SC_HB_CAPACITY). 
+  The penalty is the capacity minus the number of H-bonds, capped at 0:
     e.g. ASN/OD1 has capacity "1.5" so
         0 hbonds  -> penalty = 1.5
         1 hbonds  -> penalty = 0.5
@@ -32,32 +31,49 @@ A few notes:
         - first shell (everything H-bonding directly to ligand; this is a subset of protein)
         - protein (side chains only)
         - total ( = ligand + protein )
-- Burial is determined by the solvent-accessible surface area of the atom (see --sasa_threshold)
-- Any buried charged residues without a H-bond to a compensating charge get an additional penalty of +1.
+- An alternative, "statistical" buns energy is also included. It is calculated from H-bonding statistics of
+  buried residues in the pdb. It is probably better calibrated than the capacity-based counting method.
+- For convenience, the buns energy is provided on a per-residue level under `stat_en_dict` and `buns_en_dict`
+
+- Hydrogen bonding geometric requirements can either come from probe or from COMBS. If you use COMBS,
+  you should specify --use_combsian_contact, --ligand_resname, and --ligand_params
+- Burial is determined by the solvent-accessible surface area of the atom (see --sasa_threshold and --sasa_probe_radius)
+  OR by the alpha hull burial (see --use_alpha_hull and --dist_to_hull_threshold)
+- Any buried charged residues that are not H-bonding to an oppositely charged residue gets a charge penalty of +1.
+  Each buried charge can only neutralize one other charge (so two Asps H-bonding to a Arg is still overall +1)
 - The list of "buns atoms" is determined separately from the buns energy; it uses a simpler criterion
   where >=1 H-bond is enough to count as "satisfied". (MET and CYS don't count as buns)
 
 .....................
 
 TODO add option to remove the resnum in ligand atom names
-TODO add option for custom ligand bun energies
 TODO check why probe sometimes doesn't get water hbonds
 TODO check why for OBI the atom HO25 is not counted as an hbond?
 
 2023-11-14: created by jchang
 2023-11-28: add bun energy calculation
 2023-12-07: separated into a separate "run_bunsalyze" function
+2023-01-26: save intermediate files in subdirectories if the original files are in subdirectories
+2023-02-12: fix this ^ but haven't tested it
+2023-03-11: add "statistical bun energy"
+2023-03-14: add "wh" for weak H-bonds -- though I don't know how to get probe output it
+2023-03-14: add option to use COMBSian hb/clash detection in lieu of probe
+            and AlphaHull in lieu of probe or freesasa
+2023-03-22: add ligand_bun_atom_dict and ligand_charged_groups; adjust charge compensation so each buried
+            only has the ability to neutralize one other buried charge
 '''
 from pathlib import Path
 from tqdm import tqdm
 import subprocess
 import json
-import pandas as pd
 import sys
 import os
 from collections import defaultdict
 import multiprocessing
 import itertools
+import contextlib
+import io
+import math
 
 # ------------------------------------------------
 # CONSTANTS
@@ -74,6 +90,7 @@ FREESASA_CMD = '/programs/x86_64-linux/freesasa/2.1.2/bin/freesasa --depth=atom 
 
 MAIN_CHAIN_ATOMS = {'N','CA','C','O','OXT','H','H1','H2','H3'}
 
+
 SIDECHAIN_HBOND_DONORS = {
     'SER': ['HG'],
     'THR': ['HG1'],
@@ -83,6 +100,9 @@ SIDECHAIN_HBOND_DONORS = {
     'GLN': ['HE21', 'HE22'],
     'ASN': ['HD21', 'HD22'],
     'LYS': ['HZ1', 'HZ2', 'HZ3'],
+    'HID': ['HD1'],
+    'HIE': ['HE2'],
+    'HIP': ['HD1','HE2'],
     'HIS': ['HD1', 'HE2'], # depends on protonation state
     'ARG': ['HE', 'HH11', 'HH12', 'HH21', 'HH22'],
     'HOH': ['H1', 'H2'],
@@ -95,6 +115,8 @@ SIDECHAIN_HBOND_ACCEPTORS = {
     'GLU': ['OE1', 'OE2'],
     'ASN': ['OD1'],
     'ASP': ['OD1', 'OD2'],
+    'HID': ['NE2'],
+    'HIE': ['ND1'],
     'HIS': ['ND1', 'NE2'], # depends on protonation state
     'CYS': ['SG'],
     'MSE': ['SE'],
@@ -107,7 +129,6 @@ for resname,names in itertools.chain(SIDECHAIN_HBOND_DONORS.items(), SIDECHAIN_H
         SC_HB_CAPACITY[resname][name] = 1.0
 SC_HB_CAPACITY['CYS']['HG'] = 0.1
 SC_HB_CAPACITY['TRP']['HE1'] = 0.5
-
 SC_HB_CAPACITY['SER']['OG']  = 0.5
 SC_HB_CAPACITY['THR']['OG1'] = 0.5
 SC_HB_CAPACITY['TYR']['OH']  = 0.2
@@ -119,12 +140,141 @@ SC_HB_CAPACITY['ASP']['OD1'] = 1.5
 SC_HB_CAPACITY['ASP']['OD2'] = 1.5
 SC_HB_CAPACITY['HIS']['ND1'] = 0.5
 SC_HB_CAPACITY['HIS']['NE2'] = 0.5
+SC_HB_CAPACITY['HIE']['ND1'] = 0.5
+SC_HB_CAPACITY['HID']['NE2'] = 0.5
 SC_HB_CAPACITY['CYS']['SG'] = 0.1
 SC_HB_CAPACITY['MSE']['SE'] = 0.1
 SC_HB_CAPACITY['MET']['SD'] = 0.1
 SC_HB_CAPACITY['HOH']['O'] = 1.5
 
 CHARGED_PENALTIES = { resname : 1.0 for resname in ['GLU', 'ASP', 'LYS', 'ARG']}
+CHARGE_OF = {'GLU':-1, 'ASP':-1, 'LYS':+1, 'ARG':+1 }
+
+SC_HB_ORDER_MAP = dict()
+for aa,atoms in SC_HB_CAPACITY.items():
+    SC_HB_ORDER_MAP[aa] = dict()
+    for i,atom in enumerate(atoms):
+        SC_HB_ORDER_MAP[aa][atom] = i
+
+BUN_EN_DICT = dict()
+BUN_EN_DICT['ARG',(1,1,1,1,1)] = 0.00
+BUN_EN_DICT['ARG',(1,1,1,1,0)] = 1.35
+BUN_EN_DICT['ARG',(1,1,1,0,0)] = 1.96
+BUN_EN_DICT['ARG',(1,1,0,0,0)] = 2.66
+BUN_EN_DICT['ARG',(1,0,0,0,0)] = 3.09
+BUN_EN_DICT['ARG',(0,0,0,0,0)] = 2.85
+BUN_EN_DICT['ASN',(1,1,2)]     = 0.03
+BUN_EN_DICT['ASN',(1,1,1)]     = 0.00
+BUN_EN_DICT['ASN',(1,1,0)]     = 1.07
+BUN_EN_DICT['ASN',(1,0,2)]     = 0.75 # 1.09
+BUN_EN_DICT['ASN',(1,0,1)]     = 0.75
+BUN_EN_DICT['ASN',(1,0,0)]     = 1.63
+BUN_EN_DICT['ASN',(0,0,2)]     = 1.04 # 1.56
+BUN_EN_DICT['ASN',(0,0,1)]     = 1.04
+BUN_EN_DICT['ASN',(0,0,0)]     = 2.00
+BUN_EN_DICT['ASP',(3,3)]       = 0.62
+BUN_EN_DICT['ASP',(3,2)]       = 0.32
+BUN_EN_DICT['ASP',(3,1)]       = 0.95
+BUN_EN_DICT['ASP',(3,0)]       = 2.07
+BUN_EN_DICT['ASP',(2,2)]       = 0.00
+BUN_EN_DICT['ASP',(2,1)]       = 0.57
+BUN_EN_DICT['ASP',(2,0)]       = 1.53
+BUN_EN_DICT['ASP',(1,1)]       = 0.81
+BUN_EN_DICT['ASP',(1,0)]       = 1.33
+BUN_EN_DICT['ASP',(0,0)]       = 1.64
+BUN_EN_DICT['CYS',(1,1)]       = 0.00 # 0.65
+BUN_EN_DICT['CYS',(1,0)]       = 0.00 # 0.00
+BUN_EN_DICT['CYS',(0,1)]       = 0.00 # 0.86
+BUN_EN_DICT['CYS',(0,0)]       = 0.00 # 0.18
+BUN_EN_DICT['GLN',(1,1,2)]     = 0.04
+BUN_EN_DICT['GLN',(1,1,1)]     = 0.00
+BUN_EN_DICT['GLN',(1,1,0)]     = 1.07
+BUN_EN_DICT['GLN',(1,0,2)]     = 0.73 # 1.06
+BUN_EN_DICT['GLN',(1,0,1)]     = 0.73
+BUN_EN_DICT['GLN',(1,0,0)]     = 1.49
+BUN_EN_DICT['GLN',(0,0,2)]     = 1.10 # 1.63
+BUN_EN_DICT['GLN',(0,0,1)]     = 1.10
+BUN_EN_DICT['GLN',(0,0,0)]     = 2.05
+BUN_EN_DICT['GLU',(3,3)]       = 0.69
+BUN_EN_DICT['GLU',(3,2)]       = 0.35
+BUN_EN_DICT['GLU',(3,1)]       = 1.05
+BUN_EN_DICT['GLU',(3,0)]       = 2.32
+BUN_EN_DICT['GLU',(2,2)]       = 0.00
+BUN_EN_DICT['GLU',(2,1)]       = 0.67
+BUN_EN_DICT['GLU',(2,0)]       = 1.54
+BUN_EN_DICT['GLU',(1,1)]       = 0.72
+BUN_EN_DICT['GLU',(1,0)]       = 1.29
+BUN_EN_DICT['GLU',(0,0)]       = 1.51
+BUN_EN_DICT['HID',(1,1)]       = 0.00
+BUN_EN_DICT['HID',(1,0)]       = 0.55
+BUN_EN_DICT['HID',(0,1)]       = 0.94
+BUN_EN_DICT['HID',(0,0)]       = 0.57
+BUN_EN_DICT['HIE',(1,1)]       = 0.00
+BUN_EN_DICT['HIE',(1,0)]       = 0.90
+BUN_EN_DICT['HIE',(0,1)]       = 1.24
+BUN_EN_DICT['HIE',(0,0)]       = 1.19
+BUN_EN_DICT['HIP',(1,1)]       = 0.00
+BUN_EN_DICT['HIP',(1,0)]       = 0.99
+BUN_EN_DICT['HIP',(0,1)]       = 1.15
+BUN_EN_DICT['HIP',(0,0)]       = 1.17
+BUN_EN_DICT['LYS',(1,1,1)]     = 0.00
+BUN_EN_DICT['LYS',(1,1,0)]     = 1.20
+BUN_EN_DICT['LYS',(1,0,0)]     = 1.89
+BUN_EN_DICT['LYS',(0,0,0)]     = 2.01
+BUN_EN_DICT['MET',(1,)]        = 0.00 # 0.74
+BUN_EN_DICT['MET',(0,)]        = 0.00
+BUN_EN_DICT['SER',(1,2)]       = 0.00 # 0.65
+BUN_EN_DICT['SER',(1,1)]       = 0.00
+BUN_EN_DICT['SER',(1,0)]       = 0.44
+BUN_EN_DICT['SER',(0,2)]       = 0.98
+BUN_EN_DICT['SER',(0,1)]       = 1.02
+BUN_EN_DICT['SER',(0,0)]       = 1.62
+BUN_EN_DICT['THR',(1,2)]       = 0.00 # 0.55
+BUN_EN_DICT['THR',(1,1)]       = 0.00
+BUN_EN_DICT['THR',(1,0)]       = 0.39
+BUN_EN_DICT['THR',(0,2)]       = 1.02
+BUN_EN_DICT['THR',(0,1)]       = 1.08
+BUN_EN_DICT['THR',(0,0)]       = 1.60
+BUN_EN_DICT['TRP',(1,)]        = 0.00
+BUN_EN_DICT['TRP',(0,)]        = 1.00
+BUN_EN_DICT['TYR',(1,2)]       = 0.00 # 1.01
+BUN_EN_DICT['TYR',(1,1)]       = 0.00
+BUN_EN_DICT['TYR',(1,0)]       = 0.08
+BUN_EN_DICT['TYR',(0,2)]       = 1.12
+BUN_EN_DICT['TYR',(0,1)]       = 0.51
+BUN_EN_DICT['TYR',(0,0)]       = 1.09
+
+# Add the symmetry-related ones
+sym_pairs = {
+    'ARG': {
+        (1,1,1,1,0) : [(1,1,1,1,0), (1,1,1,0,1), (1,1,0,1,1), (1,0,1,1,1), (0,1,1,1,1)],
+        (1,1,1,0,0) : [(0,0,1,1,1), (0,1,0,1,1), (0,1,1,0,1), (0,1,1,1,0), (1,0,0,1,1), (1,0,1,0,1), (1,0,1,1,0), (1,1,0,0,1), (1,1,0,1,0), (1,1,1,0,0), ],
+        (1,1,0,0,0) : [(1,1,0,0,0), (1,0,1,0,0), (1,0,0,1,0), (1,0,0,0,1), (0,1,1,0,0), (0,1,0,1,0), (0,1,0,0,1), (0,0,1,1,0), (0,0,1,0,1), (0,0,0,1,1), ],
+        (1,0,0,0,0) : [(0,0,0,0,1), (0,0,0,1,0), (0,0,1,0,0), (0,1,0,0,0), (1,0,0,0,0)],
+    },
+    'LYS' : {
+        (1,1,0) : [(1,0,1),(0,1,1)],
+        (1,0,0) : [(0,0,1),(0,1,0)],
+    },
+    'ASN' : {
+        (1,0,2) : [(0,1,2)],
+        (1,0,1) : [(0,1,1)],
+        (1,0,0) : [(0,1,0)],
+    },
+    'GLN' : {
+        (1,0,2) : [(0,1,2)],
+        (1,0,1) : [(0,1,1)],
+        (1,0,0) : [(0,1,0)],
+    },
+}
+for aa, d in sym_pairs.items():
+    for k,vs in d.items():
+        for v in vs:
+            BUN_EN_DICT[aa,v] = BUN_EN_DICT[aa,k]
+for (aa,k) in BUN_EN_DICT.copy():
+    if aa in ['GLU', 'ASP']:
+        new_k = (k[1],k[0])
+        BUN_EN_DICT[aa,new_k] = BUN_EN_DICT[aa,k]
 
 # ------------------------------------------------
 # HELPER FUNCTIONS
@@ -133,10 +283,29 @@ CHARGED_PENALTIES = { resname : 1.0 for resname in ['GLU', 'ASP', 'LYS', 'ARG']}
 class BunsalyzeError(Exception):
     pass
 
+SIDECHAIN_HBOND_DONORS_RENAMED = { resname : [name[-1]+name[:-1] for name in names if name[-1].isdigit()]
+                                  for (resname,names) in SIDECHAIN_HBOND_DONORS.items() }
+
+def normalize_hydrogen_atom_names(pdb_str):
+    'replace e.g. 1HD2 with HD21'
+    lines = []
+    for line in pdb_str.split('\n'):
+        if line[:4] == 'ATOM' and line[12].isdigit() and line[13] == 'H':
+            resname = line[17:20]
+            atom = line[12:16]
+            if atom.strip() in SIDECHAIN_HBOND_DONORS_RENAMED.get(resname, dict()):
+                atom = (atom[1:].strip() + atom[0]).rjust(4)
+                line = list(line)
+                line[12:16] = list(atom)
+                line = ''.join(line)
+        lines.append(line)
+    return '\n'.join(lines)
+
 def parse_probe_output(probe_output):
     '''
     Parse the probe output into a pd.DataFrame where each row corresponds to a pair of contacting atoms
     '''
+    import pandas as pd
     rows = []
     for line in probe_output.split('\n'):
         try:
@@ -159,6 +328,16 @@ def parse_probe_output(probe_output):
             contact_type=contact_type,
         ))
     return pd.DataFrame(rows)
+
+
+def guess_his_protonation(names):
+    if 'HD1' in names and 'HE2' in names:
+        return 'HIP'
+    if 'HD1' in names or 'NE2' in names:
+        return 'HID'
+    if 'ND1' in names or 'HE2' in names:
+        return 'HIE'
+    return 'HID'
 
 def determine_his_don_acc_atoms(names):
     '''
@@ -217,27 +396,123 @@ def parse_ligand_dons_and_accs(filename):
     return parse(dons_line), parse(accs_line)
 
 def find_first_shell(contacts_df, ligand_chain):
-    'Returns a list of (chain,resnum) that makes the first shell via h-bonding to ligand'
-    tmp = contacts_df.query('chain1 == @ligand_chain and contact_type == "hb" and name2 not in @MAIN_CHAIN_ATOMS and chain2 != @ligand_chain')[['chain2','resnum2']].drop_duplicates()
+    'Returns a list of (chain,resnum) that makes the first shell via h-bonding to ligand, through side chain (or water)'
+    query = ' and '.join([      
+                          'chain1 == @ligand_chain',
+                          'contact_type == "hb"',
+                          '(resname2 == "HOH" or name2 not in @MAIN_CHAIN_ATOMS)',
+                          'chain2 != @ligand_chain'
+                          ])
+    tmp = contacts_df.query(query)[['chain2','resnum2']].drop_duplicates()
     return list(sorted(tmp.itertuples(index=False, name=None)))
 
-def parse_freesasa_output(freesasa_output : str, 
+def find_combsian_contacts(pdb_pr, ligand_resname : str, ligand_params : str, vdW_tolerance : float = 0.15):
+    '''
+    Use combs's contact class to calculate a contacts dataframe of a pdb.
+    pdb_pr is a prody object of the pdb
+    ligand_resname is the three-letter residue code of the ligand
+    ligand_params is path to the ligand.params file
+    '''
+    sys.path.insert(0, '/nfs/polizzi/jchang/Combs2/')
+    # I added HA1 to the atom_type_dict for GLY in my constants
+    from combs2.design.dataframe import make_df_from_prody
+    from combs2.design.functions import make_lig_hbond_dict, make_lig_atom_type_dict
+    from combs2.design.contacts import Contact
+
+    lig_kwargs = dict()
+    if ligand_params is not None:
+        lig_kwargs['lig_atom_types_dict'] = make_lig_atom_type_dict(ligand_resname, ligand_params)
+        lig_kwargs['can_hbond_dict'] = make_lig_hbond_dict(ligand_resname, ligand_params)
+    try:
+        pdb_df = make_df_from_prody(pdb_pr, **lig_kwargs)
+    except Exception as e:
+        raise BunsalyzeError(f"Failed to parse pdb+ligand into dataframe: {pdb_pr.getTitle()}\nPerhaps you need to specify --ligand_resname and --ligand_params?")
+    c = Contact(pdb_df, pdb_df, tol=vdW_tolerance)
+    c.find()
+    df = c.df_contacts
+    column_name_map = {
+        'chain_q':'chain1',
+        'resnum_q':'resnum1',
+        'resname_q':'resname1',
+        'name_q':'name1',
+        'chain_t':'chain2',
+        'resnum_t':'resnum2',
+        'resname_t':'resname2',
+        'name_t':'name2',
+        'contact_type':'contact_type'
+    }
+    df = df[column_name_map.keys()].rename(columns=column_name_map)
+    # Nick currently has two rows for each H-bond A...H-D: one for AD and one for AH. We just want one
+    df = df[~((df['contact_type'] == 'hb') & (df['name1'].str[0] != 'H') & (df['name2'].str[0] != 'H'))]
+    return df
+
+def run_alpha_hull(pdb_pr):
+    '''
+    Determine the burial status of each atom in pdb_str
+    pdb_pr is a prody object of the pdb
+    The output is returned as a dictionary, in the same format as freesasa's json output
+    '''
+    # Importing this can be rather slow, so we do it inside here 
+    sys.path.insert(0, '/nfs/polizzi/jchang/python_shared/')
+    from convex_hull import AlphaHull
+    cbeta_coords = calculate_cbeta_coords(pdb_pr)
+    hull = AlphaHull()
+    hull.coords = cbeta_coords
+    hull.calc_hull()
+
+    burial_info = defaultdict(list) # chain id -> list of residue infos
+    for res in pdb_pr.iterResidues():
+        chid = res.getChid()
+        resnum = int(res.getResnum())
+        resname = res.getResname()
+        names = res.getNames()
+        coords = res.getCoords()
+        atoms = []
+        for name, coord in zip(names, coords):
+            # TODO if desired, skip the nonpolar atoms
+            dist_to_hull = float(hull.get_pnt_distance_(coord)) # prody uses float64s, use the float64 version of this numba fxn
+            atoms.append(dict(name=name, dist_to_hull=dist_to_hull))
+        burial_info[chid].append(dict(number=resnum, name=resname, atoms=atoms))
+
+    chains = [
+        {'label' : chid, 'residues' : residues} 
+        for (chid,residues) in burial_info.items() 
+    ]
+    ret = {'results' : [{'structure' : [{'chains' : chains}]}]}
+    return ret
+
+def calculate_cbeta_coords(pdb_pr):
+    'pdb_pr is a prody object; code from Jody/Ben'
+    import numpy as np
+    N = pdb_pr.select('name N').getCoords()
+    CA = pdb_pr.select('name CA').getCoords()
+    C = pdb_pr.select('name C').getCoords()
+    O = pdb_pr.select('name O').getCoords()
+    b = CA - N
+    c = C - CA
+    a = np.cross(b, c, axis=-1)
+    CB = -0.58273431*a + 0.56802827*b - 0.54067466*c + CA
+    return CB
+
+
+def parse_freesasa_output(freesasa_output : dict, 
                           include_main_chain : bool, 
                           ligand_chain : str, 
                           ligand_dons : list, 
                           ligand_accs : list,
+                          use_alpha_hull : bool,
+                          dist_to_hull_threshold : float,
                           sasa_threshold : float):
     '''
-    freesasa_output is the output of freesasa in .json format, at atom-level detail
+    freesasa_output is the parsed .json output of freesasa, at atom-level detail
 
     Returns a dict with
         key = (chain, resnum, resname)
         value = (list of donor atoms, list of acceptor atoms, list of all buried atoms)
     '''
-    j = json.loads(freesasa_output)
     out_dict = dict()
     ligand_found = False
-    for res in j['results']:
+    for res in freesasa_output['results']:
         for struc in res['structure']:
             for chain in struc['chains']:
                 chid = chain['label']
@@ -253,14 +528,16 @@ def parse_freesasa_output(freesasa_output : str,
                         ligand_found = True
                     else:
                         if resname == 'HIS':
-                            dons, accs = determine_his_don_acc_atoms(atoms)
-                        else:
-                            dons = SIDECHAIN_HBOND_DONORS.get(resname, [])
-                            accs = SIDECHAIN_HBOND_ACCEPTORS.get(resname, [])
+                            resname = guess_his_protonation(atoms)
+                        dons = SIDECHAIN_HBOND_DONORS.get(resname, [])
+                        accs = SIDECHAIN_HBOND_ACCEPTORS.get(resname, [])
                         if include_main_chain:
                             dons, accs = (dons + ['H']), (accs + ['O'])
 
-                    buried_atoms = { a['name'] for a in res['atoms'] if a['area'] <= sasa_threshold }
+                    if use_alpha_hull:
+                        buried_atoms = { a['name'] for a in res['atoms'] if a['dist_to_hull'] >= dist_to_hull_threshold }
+                    else:
+                        buried_atoms = { a['name'] for a in res['atoms'] if a['area'] <= sasa_threshold }
                     # if chid == ligand_chain and resnum <= 2:
                     #     print('\n'.join(f'{resnum}/{a["name"]}\t{a["area"]:.2f}' for a in res['atoms']))
 
@@ -269,23 +546,36 @@ def parse_freesasa_output(freesasa_output : str,
         raise BunsalyzeError(f'Ligand chain {ligand_chain} not found in pdb file. Check the --ligand_chain, or provide a separate --ligand_pdb?')
     return out_dict
 
-def calculate_buns_and_clashes(buried_atoms_dict, contacts_df, include_main_chain_buns, ligand_chain):
+def is_hydrogen(s):
+    return s[0] == 'H' or (s[0].isdigit() and s[1] == 'H')
+
+def calculate_buns_and_clashes(buried_atoms_dict, contacts_df, include_main_chain_buns, 
+                               print_all_polar_sc_stat_en, count_wh, ligand_chain, ligand_bun_atom_dict, ligand_charged_groups):
     'Returns a dict of buns and clashes info'
     first_shell = find_first_shell(contacts_df, ligand_chain)
-    # print(first_shell)
+    # print(first_shell, file=sys.stderr)
     hbonding_dict = defaultdict(lambda: defaultdict(set))
-    clashing_dict = defaultdict(set)
+    clashing_dict = defaultdict(lambda: defaultdict(set))
     clashing_with_ligand_dict = defaultdict(set)
     for row in contacts_df.itertuples():
-        if row.contact_type == 'hb':
+        # TODO I think I need to adjust the probe flags to print out wh; right now there doesn't seem to be any in the output
+        # if row.contact_type == 'wh':
+        #     print(row, file=sys.stderr)
+        if row.contact_type == 'hb' or (count_wh and row.contact_type == 'wh'):
             atom2 = (row.chain2, row.resname2, row.resnum2, row.name2)
             hbonding_dict[row.chain1, row.resnum1][row.name1].add(atom2)
-        elif row.contact_type == 'bo':
-            clashing_dict[row.chain1, row.resnum1].add(row.name1)
+        elif row.contact_type == 'bo' or row.contact_type == 'cl':
+            # TODO a more sophisticated check of whether two atoms are within 4 bonds of each other
+            # this could allow some "false negatives" through still
+            if abs(row.resnum1 - row.resnum2) > 1 and not is_hydrogen(row.name2):
+                atom2 = (row.chain2, row.resname2, row.resnum2, row.name2)
+                clashing_dict[row.chain1, row.resnum1][row.name1].add(atom2)
             if row.chain2 == ligand_chain:
                 clashing_with_ligand_dict[row.chain1, row.resnum1].add(row.name1)
+    ligand_resnums = set(resnum for (chain,resnum,resname) in buried_atoms_dict.keys() if chain == ligand_chain)
 
     clashing_buried_sidechains_resnums = []
+    clashing_buried_sidechains_atoms = []
     clashing_with_ligand_resnums = []
     protein_acc_buns_atoms = []
     protein_don_buns_atoms = []
@@ -294,19 +584,92 @@ def calculate_buns_and_clashes(buried_atoms_dict, contacts_df, include_main_chai
     ligand_acc_buns_atoms = []
     ligand_don_buns_atoms = []
     ligand_hbonded_atoms = []
+    ligand_exposed_polar_atoms = []
     ligand_buried_polar_atoms = []
     ligand_hbonding_partners = dict()
     buns_en_dict = dict() # keys = (chain,resnum) and values = bun_en
     lig_buns_en = 0.0
+    lig_buns_en_dict = dict()
     protein_buns_en = 0.0
     first_shell_buns_en = 0.0
     total_buns_en = 0.0
 
-    for (chain,resnum,resname),(dons,accs,buried_atoms) in buried_atoms_dict.items():
+    # new "statistical" bun energy counting
+    stat_en_dict = dict()
+    stat_en_str = dict()
+    protein_stat_en = 0.0
+    first_shell_stat_en = 0.0
+
+    # charged penalty for uncompensated charges. This is added to the buns_en, but not to the stat_en
+    charge_en = 0
+    charge_en_dict = dict()
+
+    # take care of the charged penalty first
+    for (chain,resnum,resname),(dons,accs,buried_atoms) in sorted(buried_atoms_dict.items()):
+        if (resname in ['GLU','ASP'] and len(accs & buried_atoms) == 2
+                        or resname == 'LYS' and len(dons & buried_atoms) >= 2 
+                        or resname == 'ARG' and len(dons & buried_atoms) >= 4):
+            charge_en_dict[f'{chain}/{resname}`{resnum}'] = 1 #'+'.join(dons&buried_atoms)+'+'.join(accs&buried_atoms)
+    # Neutralize the ligand's hbonding partners
+    ligand_charge_en = 0
+    for (chain,resnum,resname),(dons,accs,buried_atoms) in sorted(buried_atoms_dict.items()):
+        if chain != ligand_chain:
+            continue
+        hbd = hbonding_dict[chain,resnum]
+        for charged_group,charge in ligand_charged_groups.items():
+            neutralized = False
+            for name1 in charged_group:
+                if name1 not in hbd:
+                    continue
+                for (chain2, resname2, resnum2, name2) in hbd[name1]:
+                    key2 = f'{chain2}/{resname2}`{resnum2}'
+                    if key2 in charge_en_dict and CHARGE_OF.get(resname2, 0) == -1*charge:
+                        # This residue is used to neutralize the charged group on the ligand
+                        charge_en_dict[key2] = 0
+                        neutralized = True
+                        break
+                if neutralized:
+                    break
+            key = f'{chain}/{resname}`{resnum}/' + '+'.join(charged_group)
+            if neutralized:
+                charge_en_dict[key] = 0
+            else:
+                charge_en_dict[key] = 1
+                ligand_charge_en += 1
+    # Now neutralize the protein charged residues
+    for (chain,resnum,resname),(dons,accs,buried_atoms) in sorted(buried_atoms_dict.items()):
+        if chain == ligand_chain:
+            continue
+        key1 = f'{chain}/{resname}`{resnum}'
+        if key1 not in charge_en_dict:
+            continue
+        hbd = hbonding_dict[chain,resnum]
+        for name1 in hbd:
+            neutralized = False
+            for (chain2, resname2, resnum2, name2) in hbd[name1]:
+                key2 = f'{chain2}/{resname2}`{resnum2}'
+                if CHARGE_OF.get(resname2, 0) == -1*CHARGE_OF.get(resname, 9000):
+                    if key2 not in charge_en_dict:
+                        charge_en_dict[key1] = 0
+                        neutralized = True
+                    elif charge_en_dict[key2] != 0:
+                        # buried charges can only be used to neutralize a charge once
+                        charge_en_dict[key2] = 0
+                        charge_en_dict[key1] = 0
+                        neutralized = True
+                if neutralized:
+                    break
+            if neutralized:
+                break
+    charge_en = sum(charge_en_dict.values())
+
+
+    for (chain,resnum,resname),(dons,accs,buried_atoms) in sorted(buried_atoms_dict.items()):
+        resname_ = 'HIS' if resname in ['HID', 'HIE', 'HIP'] else resname
         hbd = hbonding_dict[chain,resnum]
         hbonding_atoms = set(hbd.keys())
         hb_counts = {atom : len(hbd[atom]) for atom in hbd}
-        clashing_atoms = clashing_dict[chain,resnum]
+        clashing_atoms = set(clashing_dict[chain,resnum].keys())
         clashing_atoms_with_ligand = clashing_with_ligand_dict[chain,resnum]
         ## The pandas query is much slower than simple python
         # res_query = ' (chain1 == @chain and resnum1 == @resnum) '
@@ -319,37 +682,47 @@ def calculate_buns_and_clashes(buried_atoms_dict, contacts_df, include_main_chai
         buns_don_atoms = buried_dons - hbonding_atoms
         buns_acc_atoms = buried_accs - hbonding_atoms
 
-        clashing_buried_sidechain_heavyatoms = set(filter(lambda x: not x.startswith("H"), 
+        clashing_buried_sidechain_heavyatoms = set(filter(lambda x: not is_hydrogen(x),
                                                           buried_atoms & (clashing_atoms - MAIN_CHAIN_ATOMS)))
         clashing_buried_atoms_with_ligand = buried_atoms & clashing_atoms_with_ligand
 
         if chain == ligand_chain:
+            # Add the ligand resnum if it's a multi-residue ligand
+            def f(iterable):
+                return [name if len(ligand_resnums) == 1 else f'{resnum}/{name}'
+                        for name in sorted(iterable)]
+
             if len(buns_acc_atoms) > 0:
-                ligand_acc_buns_atoms.extend( [f'{resnum}/{name}' for name in sorted(buns_acc_atoms)] )
+                ligand_acc_buns_atoms.extend(f(buns_acc_atoms) )
             if len(buns_don_atoms) > 0:
-                ligand_don_buns_atoms.extend( [f'{resnum}/{name}' for name in sorted(buns_don_atoms)] )
-            ligand_buried_polar_atoms.extend([f'{resnum}/{name}' for name in sorted(buried_atoms & (dons | accs))])
-            ligand_hbonded_atoms.extend( [f'{resnum}/{name}' for name in sorted(hbonding_atoms & (dons | accs))])
+                ligand_don_buns_atoms.extend(f(buns_don_atoms) )
+            ligand_buried_polar_atoms.extend(f(buried_atoms & (dons | accs)))
+            ligand_exposed_polar_atoms.extend(f((dons | accs) - buried_atoms))
+            ligand_hbonded_atoms.extend(f(hbonding_atoms & (dons | accs)))
             for name in sorted(dons | accs):
-                ligand_hbonding_partners[f'{resnum}/{name}'] = []
+                atom = name if len(ligand_resnums) == 1 else f'{resnum}/{name}'
+                ligand_hbonding_partners[atom] = []
                 for (pchain, presname, presnum, pname) in hbonding_dict[chain, resnum][name]:
-                    ligand_hbonding_partners[f'{resnum}/{name}'].append(f'{pchain}/{presname}`{presnum}/{pname}')
+                    ligand_hbonding_partners[atom].append(f'{pchain}/{presname}`{presnum}/{pname}')
         else:
             if len(clashing_buried_sidechain_heavyatoms) > 0:
-                # print(contacts_df.query('chain1 == @chain and resnum1 == @resnum and contact_type == "bo"').to_string())
+                # print(contacts_df.query('chain1 == @chain and resnum1 == @resnum and contact_type == "cl" and name1 in @clashing_buried_sidechain_heavyatoms').to_string())
                 # print(resnum, resname, clashing_buried_sidechain_heavyatoms)
                 clashing_buried_sidechains_resnums.append(resnum)
+                for name in clashing_buried_sidechain_heavyatoms:
+                    for chain2,resname2,resnum2,name2 in clashing_dict[chain,resnum][name]:
+                        clashing_buried_sidechains_atoms.append(f'{chain}/{resname_}`{resnum}/{name} xxx {chain2}/{resname2}`{resnum2}/{name2}')
             if len(clashing_buried_atoms_with_ligand) > 0:
                 # print(contacts_df.query('chain1 == @chain and resnum1 == @resnum and chain2 == @ligand_chain and contact_type == "bo"').to_string())
                 # print(resnum, resname, clashing_buried_atoms_with_ligand)
                 clashing_with_ligand_resnums.append(resnum)
             if len(buns_acc_atoms) > 0:
-                buns_acc_names = [f'{chain}/{resname}`{resnum}/{name}' for name in sorted(buns_acc_atoms)]
+                buns_acc_names = [f'{chain}/{resname_}`{resnum}/{name}' for name in sorted(buns_acc_atoms)]
                 protein_acc_buns_atoms.extend(buns_acc_names)
                 if (chain, resnum) in first_shell:
                     first_shell_acc_buns_atoms.extend(buns_acc_names)
             if len(buns_don_atoms) > 0:
-                buns_don_names = [f'{chain}/{resname}`{resnum}/{name}' for name in sorted(buns_don_atoms)]
+                buns_don_names = [f'{chain}/{resname_}`{resnum}/{name}' for name in sorted(buns_don_atoms)]
                 protein_don_buns_atoms.extend(buns_don_names)
                 if (chain, resnum) in first_shell:
                     first_shell_don_buns_atoms.extend(buns_don_names)
@@ -362,36 +735,47 @@ def calculate_buns_and_clashes(buried_atoms_dict, contacts_df, include_main_chai
             try:
                 hb_capacity = SC_HB_CAPACITY[resname][name]
             except KeyError:
-                # TODO account for custom ligand buns
-                if name.startswith('O'):
+                if name in ligand_bun_atom_dict:
+                    hb_capacity = ligand_bun_atom_dict[name]
+                elif name.startswith('O'):
                     hb_capacity = 1.5
                 else:
                     hb_capacity = 1.0
             penalty = max(0, hb_capacity - num_hb)
+            if chain == ligand_chain:
+                lig_buns_en_dict[name] = penalty
             buns_en += penalty
 
-        # Add an additional penalty for uncompensated buried charges
-        # TODO account for charged groups in the ligand
-        # TODO un-dry?
-        if resname in ['GLU', 'ASP'] and len(buried_accs) == 2:
-            flag = False
-            for name1 in hbd.keys():
-                for (chain2, resname2, resnum2, name2) in hbd[name1]:
-                    if resname2 in ['LYS', 'ARG'] and name1 not in ['O','H'] and name2 not in ['O','H']:
-                        flag = True
-            if not flag:
-                buns_en += CHARGED_PENALTIES[resname]
-        if resname == 'LYS' and len(buried_dons) >= 2 or resname == 'ARG' and len(buried_dons) >= 4:
-            flag = False
-            for name1 in hbd.keys():
-                for (chain2, resname2, resnum2, name2) in hbd[name1]:
-                    if resname2 in ['GLU', 'ASP'] and name1 not in ['O','H'] and name2 not in ['O','H']:
-                        flag = True
-            if not flag:
-                buns_en += CHARGED_PENALTIES[resname]
+# this is the old method
+#         # Add an additional penalty for uncompensated buried charges
+#         if resname in ['GLU', 'ASP'] and len(buried_accs) == 2:
+#             flag = False
+#             for name1 in hbd.keys():
+#                 for (chain2, resname2, resnum2, name2) in hbd[name1]:
+#                     if resname2 in ['LYS', 'ARG'] and name1 not in ['O','H'] and name2 not in ['O','H']:
+#                         flag = True
+#             if not flag:
+#                 buns_en += CHARGED_PENALTIES[resname]
+#         if resname == 'LYS' and len(buried_dons) >= 2 or resname == 'ARG' and len(buried_dons) >= 4:
+#             flag = False
+#             for name1 in hbd.keys():
+#                 for (chain2, resname2, resnum2, name2) in hbd[name1]:
+#                     if resname2 in ['GLU', 'ASP'] and name1 not in ['O','H'] and name2 not in ['O','H']:
+#                         flag = True
+#             if not flag:
+#                 buns_en += CHARGED_PENALTIES[resname]
+
+        try: 
+            buns_en += charge_en_dict[f'{chain}/{resname_}`{resnum}']
+        except KeyError:
+            # this is not a charged buried residue
+            pass
+        if chain == ligand_chain:
+            buns_en += ligand_charge_en
+
 
         if buns_en != 0:
-            buns_en_dict[f'{chain}/{resname}`{resnum}'] = buns_en
+            buns_en_dict[f'{chain}/{resname_}`{resnum}'] = round(buns_en, 2)
             total_buns_en += buns_en
             if chain == ligand_chain:
                 lig_buns_en += buns_en
@@ -399,6 +783,34 @@ def calculate_buns_and_clashes(buried_atoms_dict, contacts_df, include_main_chai
                 protein_buns_en += buns_en
                 if (chain, resnum) in first_shell:
                     first_shell_buns_en += buns_en
+
+        if chain != ligand_chain and resname in SC_HB_ORDER_MAP:
+            # Also calculate a "statistical" buns energy based on the H-bond counts of each side chain atom
+            atom_order = SC_HB_ORDER_MAP[resname]
+            counts = [0]*len(atom_order)
+            counts_str = ['0']*len(atom_order)
+            for name, hb_count in hb_counts.items():
+                if name.startswith('H'):
+                    hb_count = min(hb_count, 1)
+                if name in atom_order:
+                    i = atom_order[name]
+                    counts[i] = hb_count
+                    counts_str[i] = str(hb_count)
+            # for looking up the energy, account for solvent-exposed side chain atoms -- say they're "fully satisfied"
+            for name in set(atom_order.keys()) - buried_atoms:
+                counts[atom_order[name]] = 2 if resname in ['ASP','GLU'] else 0 if resname in ['CYS','MET'] else 1
+                counts_str[atom_order[name]] = '_'
+            stat_en = BUN_EN_DICT.get((resname,tuple(counts)), 3.0)
+
+            if stat_en != 0 or print_all_polar_sc_stat_en:
+                stat_en_dict[f'{chain}/{resname_}`{resnum}'] = round(stat_en, 2)
+                stat_en_str[f'{chain}/{resname_}`{resnum}'] = ''.join(counts_str)
+                protein_stat_en += stat_en
+                if (chain, resnum) in first_shell:
+                    first_shell_stat_en += stat_en
+
+
+
 
     return dict(
         num_residues_with_clashing_buried_sidechains =  len(clashing_buried_sidechains_resnums),
@@ -408,24 +820,37 @@ def calculate_buns_and_clashes(buried_atoms_dict, contacts_df, include_main_chai
         num_ligand_buns = len(ligand_acc_buns_atoms) + len(ligand_don_buns_atoms),
         num_ligand_hbonded_atoms = len(ligand_hbonded_atoms),
         num_ligand_buried_polar_atoms = len(ligand_buried_polar_atoms),
+        num_ligand_exposed_polar_atoms = len(ligand_exposed_polar_atoms),
 
         clashing_buried_sidechains_resnums=(clashing_buried_sidechains_resnums),
         clashing_with_ligand_resnums=(clashing_with_ligand_resnums),
+        clashing_buried_sidechains_atoms = clashing_buried_sidechains_atoms,
         protein_acc_buns = (protein_acc_buns_atoms),
         protein_don_buns = (protein_don_buns_atoms),
         first_shell_acc_buns = (first_shell_acc_buns_atoms),
         first_shell_don_buns = (first_shell_don_buns_atoms),
+        first_shell_hb_resnums = [resnum for (chain,resnum) in first_shell],
         ligand_acc_buns = (ligand_acc_buns_atoms),
         ligand_don_buns = (ligand_don_buns_atoms),
         ligand_buried_polar = (ligand_buried_polar_atoms),
+        ligand_exposed_polar = (ligand_exposed_polar_atoms),
         ligand_hbonded = (ligand_hbonded_atoms),
         ligand_hbonding_partners = (ligand_hbonding_partners),
 
+        lig_buns_en = round(lig_buns_en, 2),
+        lig_buns_en_dict = lig_buns_en_dict,
+        first_shell_buns_en = round(first_shell_buns_en, 2),
+        protein_buns_en = round(protein_buns_en, 2),
+        total_buns_en = round(total_buns_en, 2),
         buns_en_dict = buns_en_dict,
-        lig_buns_en = round(lig_buns_en, 3),
-        first_shell_buns_en = round(first_shell_buns_en, 3),
-        protein_buns_en = round(protein_buns_en, 3),
-        total_buns_en = round(total_buns_en, 3),
+
+        stat_en_dict = stat_en_dict,
+        stat_en_str = stat_en_str,
+        first_shell_stat_en = round(first_shell_stat_en, 2),
+        protein_stat_en = round(protein_stat_en, 2),
+
+        charge_en = charge_en,
+        charge_en_dict = charge_en_dict,
     )
 
 def read_pdb_into_string(pdb_filename):
@@ -441,85 +866,146 @@ def run_bunsalyze(
         pdb_file : str, 
         ligand_dons : list[str],
         ligand_accs : list[str],
+        ligand_bun_atom_dict : dict,
+        ligand_charged_groups : dict,
         ligand_pdb : str = None,
         ligand_chain : str = 'L',
         run_reduce : bool = False,
         include_main_chain_buns : bool = False,
+        print_all_polar_sc_stat_en : bool = False,
+        count_wh : bool = False,
+        use_combsian_contact : bool = False,
+        ligand_resname : str = None,
+        ligand_params : str = None,
+        vdW_tolerance : float = 0.15,
+        use_alpha_hull : bool = False,
+        dist_to_hull_threshold : float =0.0,
         sasa_threshold : float = 0.0,
+        sasa_probe_radius : float = 1.4,
+        ignore_failed_files : bool = False,
         reduce_out_pdb : str = None,
         probe_out_tsv : str = None,
         freesasa_out_json : str = None,
         ):
     '''
     Parameters:
-        pdb_file            all-atom structural model to find buns / clashes in
-        ligand_dons         list of ligand donor hydrogen atom names (e.g. ['H3'], or ['1/H3'] for multi-resnum ligands)
-        ligand_accs         list of ligand acceptor heavy atom names (e.g. ['O1'], or ['2/O1'] for multi-resnum ligands)
+        pdb_file                all-atom structural model to find buns / clashes in
+        ligand_dons             list of ligand donor hydrogen atom names (e.g. ['H3'], or ['1/H3'] for multi-resnum ligands)
+        ligand_accs             list of ligand acceptor heavy atom names (e.g. ['O1'], or ['2/O1'] for multi-resnum ligands)
 
     Optional parameters:
-        ligand_pdb          if the ligand is not present in pdb_file, you can specify it here as either
-                                - path to a .pdb file, or
-                                - the contents of that .pdb file as a string
-        ligand_chain        chain id of the ligand (default: 'L')
-        run_reduce          whether to run reduce first before finding atomic contacts
-                                (you should set this flag if your protein is missing H's)
+        ligand_bun_atom_dict    the H-bonding capacity of each atom, e.g. {'O8': 0, 'H9': 0, 'O7': 2 }
+                                if not specified, the default capacity is 1.5 for O and 1.0 for all other atom types.
+        ligand_charged_groups   a dict with keys H-bonding atom names and values charge of group. e.g. for Asp:
+                                            {
+                                                ('OD1', 'OD2')     : -1,
+                                                ('O', 'OXT')       : -1,
+                                                ('H1', 'H2', 'H3') : +1,
+                                            }
+        ligand_pdb              if the ligand is not present in pdb_file, you can specify it here as either
+                                    - path to a .pdb file, or
+                                    - the contents of that .pdb file as a string
+        ligand_chain            chain id of the ligand (default: 'L')
+        run_reduce              whether to run reduce first before finding atomic contacts
+                                    (you should set this flag if your protein is missing H's)
         include_main_chain_buns
-        sasa_threshold      maximum solvent-exposed atomic surface area in A^2  (default: 0)
-                                if [sasa <= threshold] then an atom is counted as buried
-        reduce_out_pdb      if provided, the protonated protein-ligand complex is written here as a .pdb
-        probe_out_tsv       if provided, the parsed probe output is written here as a .tsv
-        freesasa_out_json   if provided, the freesasa output is written here as a .json
+        print_all_polar_sc_stat_en
+        count_wh                whether to count probe's "wh" interactions as h-bonds
+        use_combsian_contact   use COMBS's H-bonding geometry criteria instead of probe's
+        ligand_resname          three-letter ligand residue name -- necessary if using COMBS H-bonding geometry
+        ligand_params           path to ligand params file -- necessary if using COMBS H-bonding geometry
+        vdW_tolerance           vdW tolerance for clash calculation, when using COMBS H-bonding geometry (default: 0.15)
+        use_alpha_hull          use Alpha Hull to calculate burial instead of freesasa
+        dist_to_hull_threshold  if ^ is set, the dist_to_hull threshold to count as buried / exposed (default: 0)
+        sasa_threshold          maximum solvent-exposed atomic surface area in A^2  (default: 0)
+                                    if [sasa <= threshold] then an atom is counted as buried
+        sasa_probe_radius       solvent ball probe radius used for sasa calcualtions (default: 1.4A)
+        ignore_failed_files     whether to ignore failed files and keep going 💪
+        reduce_out_pdb          if provided, the protonated protein-ligand complex is written here as a .pdb
+        probe_out_tsv           if provided, the parsed probe output is written here as a .tsv
+        freesasa_out_json       if provided, the freesasa output is written here as a .json
 
     Returns: 
         dict
     '''
-    with open(pdb_file) as f:
-        pdb = f.read()
-    if ligand_pdb is not None:
-        if ligand_pdb.endswith('.pdb') and len(ligand_pdb) < 200:
-            # This is a filename
-            ligand_pdb = read_pdb_into_string(ligand_pdb)
+    try:
+        with open(pdb_file) as f:
+            pdb_str = f.read()
+        if ligand_pdb is not None:
+            if ligand_pdb.endswith('.pdb') and len(ligand_pdb) < 200:
+                # This is a filename
+                ligand_pdb = read_pdb_into_string(ligand_pdb)
+            else:
+                # The contents of the file have already read into a string
+                pass
+            # Append the ligand pdb contents to the protein pdb so that reduce, freesasa, probe, etc. know about it
+            pdb_str += ligand_pdb
+
+        pdb_str = normalize_hydrogen_atom_names(pdb_str)
+
+        # 1. Run reduce to add H's
+        if run_reduce:
+            pdb_str = subprocess.run(REDUCE_CMD.split(), input=pdb_str, text=True, capture_output=True, env=dict(os.environ, **REDUCE_ENV)).stdout
+            if reduce_out_pdb is not None:
+                Path(reduce_out_pdb).parent.mkdir(exist_ok=True, parents=True)
+                with open(reduce_out_pdb, 'w') as f:
+                    f.write(pdb_str)
+
+        if run_alpha_hull or use_combsian_contact:
+            with contextlib.redirect_stderr(open('/dev/null')):
+                # there's an annoying warning about biopython
+                import prody as pr
+            pdb_pr = pr.parsePDBStream(io.StringIO(pdb_str))
+            pdb_pr.setTitle(pdb_file)
+
+        # 2. Run probe or combsian contacts to find hbonds and clashes
+        if use_combsian_contact:
+            contacts_df = find_combsian_contacts(pdb_pr, ligand_resname, ligand_params, vdW_tolerance)
         else:
-            # The contents of the file have already read into a string
-            pass
-        # Append the ligand pdb contents to the protein pdb so that reduce, freesasa, probe, etc. know about it
-        pdb += ligand_pdb
+            probe_out = subprocess.run(PROBE_CMD.split(), input=pdb_str, text=True, capture_output=True).stdout
+            contacts_df = parse_probe_output(probe_out)
+        if probe_out_tsv is not None:
+            Path(probe_out_tsv).parent.mkdir(exist_ok=True, parents=True)
+            contacts_df.to_csv(probe_out_tsv, sep='\t', index=False)
 
-    # 1. Run reduce to add H's
-    if run_reduce:
-        pdb = subprocess.run(REDUCE_CMD.split(), input=pdb, text=True, capture_output=True, env=dict(os.environ, **REDUCE_ENV)).stdout
-        if reduce_out_pdb is not None:
-            Path(reduce_out_pdb).parent.mkdir(exist_ok=True, parents=True)
-            with open(reduce_out_pdb, 'w') as f:
-                f.write(pdb)
-
-    # 2. Run probe to find hbonds and clashes
-    probe_out = subprocess.run(PROBE_CMD.split(), input=pdb, text=True, capture_output=True).stdout
-    contacts_df = parse_probe_output(probe_out)
-    if probe_out_tsv is not None:
-        Path(probe_out_tsv).parent.mkdir(exist_ok=True, parents=True)
-        contacts_df.to_csv(probe_out_tsv, sep='\t', index=False)
-
-    # 3. Run freesasa to determine solvent-accessible surface area of each atom
-    freesasa_out = subprocess.run(FREESASA_CMD.split(), input=pdb, text=True, capture_output=True).stdout
-    if freesasa_out_json is not None:
-        Path(freesasa_out_json).parent.mkdir(exist_ok=True, parents=True)
-        with open(freesasa_out_json, 'w') as f:
-            f.write(freesasa_out)
+        # 3. Run freesasa or alpha hull to determine burial of each atom
+        if use_alpha_hull:
+            freesasa_out_parsed = run_alpha_hull(pdb_pr)
+            freesasa_out_str = json.dumps(freesasa_out_parsed, indent=2)
+        else:
+            freesasa_cmd = FREESASA_CMD.split()
+            freesasa_cmd += [f'--probe-radius={sasa_probe_radius}']
+            freesasa_out_str = subprocess.run(freesasa_cmd, input=pdb_str, text=True, capture_output=True).stdout
+            freesasa_out_parsed = json.loads(freesasa_out_str)
+        if freesasa_out_json is not None:
+            Path(freesasa_out_json).parent.mkdir(exist_ok=True, parents=True)
+            with open(freesasa_out_json, 'w') as f:
+                f.write(freesasa_out_str)
 
     # 4. Analyze buns / clashing of all atoms; calculate buns energy
-    try:
-        buried_atoms_dict = parse_freesasa_output(freesasa_out, 
+        buried_atoms_dict = parse_freesasa_output(freesasa_out_parsed,
                                                   include_main_chain=include_main_chain_buns,
                                                   ligand_chain=ligand_chain,
                                                   ligand_dons=ligand_dons,
                                                   ligand_accs=ligand_accs,
+                                                  use_alpha_hull=use_alpha_hull,
+                                                  dist_to_hull_threshold=dist_to_hull_threshold,
                                                   sasa_threshold=sasa_threshold)
-        bc_dict = calculate_buns_and_clashes(buried_atoms_dict, contacts_df=contacts_df, 
-                                             include_main_chain_buns=include_main_chain_buns, ligand_chain=ligand_chain)
-    except BunsalyzeError as e:
+        bc_dict = calculate_buns_and_clashes(buried_atoms_dict, 
+                                             contacts_df=contacts_df, 
+                                             include_main_chain_buns=include_main_chain_buns, 
+                                             print_all_polar_sc_stat_en=print_all_polar_sc_stat_en,
+                                             count_wh=count_wh,
+                                             ligand_chain=ligand_chain,
+                                             ligand_bun_atom_dict=ligand_bun_atom_dict,
+                                             ligand_charged_groups=ligand_charged_groups,
+                                             )
+    except (BunsalyzeError, ZeroDivisionError) as e:
         print(pdb_file, e, file=sys.stderr, sep='\t')
-        return None
+        if ignore_failed_files:
+            return None
+        else:
+            raise e
 
     return dict(filename=str(Path(pdb_file).resolve()), 
                 filestem=Path(pdb_file).stem,
@@ -545,7 +1031,7 @@ def collect_files(args_input):
     else:
         # text file containing paths to pdb files
         with open(args_input) as f:
-            args = [a.strip() for a in f]
+            args = [a.strip() for a in f if len(a.strip()) != 0]
 
     if len(args) == 0:
         raise FileNotFoundError(f'No pdb files found in {args_input}')
@@ -554,30 +1040,64 @@ def collect_files(args_input):
 
 def worker_run(tup):
     pdb_file, ligand_dons, ligand_accs, args = tup
-    stem = Path(pdb_file).stem
+    if Path(args.input).is_dir():
+        # Save any intermediate files with the same nested directory structure, e.g.
+        # input file of {input_dir}/subdir/filename.pdb
+        # we want subdir/filename
+        stem = str(Path(pdb_file).relative_to(args.input))[:-4]
+    else:
+        stem = Path(pdb_file).stem
     return run_bunsalyze(
-            pdb_file=pdb_file, ligand_dons=ligand_dons, ligand_accs=ligand_accs,
-            ligand_pdb=args.ligand_pdb, ligand_chain=args.ligand_chain,
+            pdb_file=pdb_file,
+            ligand_dons=ligand_dons, 
+            ligand_accs=ligand_accs,
+            ligand_bun_atom_dict=args.ligand_bun_atom_dict,
+            ligand_charged_groups=args.ligand_charged_groups,
+            ligand_pdb=args.ligand_pdb, 
+            ligand_chain=args.ligand_chain,
             run_reduce=args.run_reduce,
             include_main_chain_buns=args.include_main_chain_buns,
+            print_all_polar_sc_stat_en=args.print_all_polar_sc_stat_en,
+            count_wh=args.count_wh,
+            use_combsian_contact=args.use_combsian_contact,
+            ligand_resname=args.ligand_resname,
+            ligand_params=args.ligand_params,
+            vdW_tolerance=args.vdW_tolerance,
+            use_alpha_hull=args.use_alpha_hull,
+            dist_to_hull_threshold=args.dist_to_hull_threshold,
             sasa_threshold=args.sasa_threshold,
+            sasa_probe_radius=args.sasa_probe_radius,
+            ignore_failed_files=args.ignore_failed_files,
             reduce_out_pdb = None if args.reduce_output_dir is None else f'{args.reduce_output_dir}/{stem}.pdb',
             probe_out_tsv = None if args.probe_output_dir is None else f'{args.probe_output_dir}/{stem}.tsv',
-            freesasa_out_json = None if args.freesasa_output_dir is None else f'{args.freesasa_output_dir}/{stem}.tsv' ,
+            freesasa_out_json = None if args.freesasa_output_dir is None else f'{args.freesasa_output_dir}/{stem}.json' ,
             )
+
 
 if __name__=='__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('input', help='A .pdb file, a directory of .pdbs, or a file containing newline-delimited pdb paths')
     parser.add_argument('ligand_dons_and_accs_file', help='file with atom names of ligand donors and acceptors. The first line should be a comma-separated list of donor (hydrogen) atoms, and the second line a comma-separated list of acceptor (heavy) atoms. If the ligand has multiple resnums, use the syntax like "1/OE1, 2/H, 2/O"')
+    parser.add_argument('--ligand_bun_atom_dict', default=dict(), help="the H-bonding capacity of each atom, e.g. {'O8': 0, 'H9': 0, 'O7': 2 }")
+    parser.add_argument('--ligand_charged_groups', default=dict(), help="a dict with keys H-bonding atom names and values charge of group. e.g. for Asp: { ('OD1', 'OD2') : -1, ('O', 'OXT') : -1, ('H1', 'H2', 'H3') : +1 } ")
     parser.add_argument('--ligand_chain', default='L', help='pdb chain of the ligand (default: L)')
     parser.add_argument('--ligand_pdb', help='.pdb file for the ligand, if it is not in the protein pdb file')
     parser.add_argument('-j', '--jobs', default=1, type=int, help='Number of worker processes to spawn')
     parser.add_argument('--no_progress_bar', action='store_true', help='whether to hide the tqdm progress bar')
+    parser.add_argument('--use_combsian_contact', action='store_true', help="whether to use COMBS to calculate H-bonds and clashes, instead of probe (default: False)")
+    parser.add_argument('--ligand_resname', help="three-letter ligand residue name. This should be provided if using COMBSian contact detection!")
+    parser.add_argument('--ligand_params', help="Path to ligand params file. This should be provided if using COMBSian contact detection!")
+    parser.add_argument('--vdW_tolerance', default=0.15, type=float, help="vdW tolerance for clash detection, only used for COMBSian contact detection (default: 0.15A)")
+    parser.add_argument('--use_alpha_hull', action='store_true', help="whether to use alpha hull to calculate burial instead of sasa (default: False)")
+    parser.add_argument('--dist_to_hull_threshold', default=0, action='store_true', help="distance to hull to count as buried (default: 0A); only valid if --use_alpha_hull is set")
     parser.add_argument('--sasa_threshold', default=0, type=float, help="maximum solvent-exposed atomic surface area (A^2); if [sasa <= threshold] then an atom is counted as buried (default: 0)")
+    parser.add_argument('--sasa_probe_radius', default=1.4, type=float, help="solvent probe radius used to calculate solvent-accessible surface area (default: 1.4A)")
     parser.add_argument('--run_reduce', action='store_true', help='whether to run reduce before finding contacts; you should set this flag only if the structure is missing hydrogens')
     parser.add_argument('--include_main_chain_buns', action='store_true', help='whether to count protein main chain atoms as buns (probably no need)')
+    parser.add_argument('--print_all_polar_sc_stat_en', action='store_true', help='whether to print the stat_en of all polar side chains, including those that are fully satisfied or solvent-exposed')
+    parser.add_argument('--count_wh', action='store_true', help='whether to consider probe "wh" interactions as hydrogen bonds')
+    parser.add_argument('--ignore_failed_files', action='store_true', help='whether to ignore failed files and keep going 💪')
     parser.add_argument('--reduce_output_dir', help='if specified, save outputs from reduce to this directory as .pdb')
     parser.add_argument('--probe_output_dir', help='if specified, save parsed outputs from probe to this directory as .tsv')
     parser.add_argument('--freesasa_output_dir', help='if specified, save outputs from freesasa to this directory as .json')
@@ -591,9 +1111,33 @@ if __name__=='__main__':
     os.environ['NUMEXPR_NUM_THREADS'] = '2'
     os.environ['NUMBA_NUM_THREADS'] = '2'
 
+    # I don't know whether these packages should be imported in the parent or child processes.
+    # Sometimes if you import it in the child process, they deadlock. My guess is that they're trying
+    # to write to the same cache files for numba?
+    # However, if you import in the parent process, you can't call fork() as the numba package uses GNU OpenMP
+    # Not sure what the best thing to do is.
+    # if args.use_alpha_hull:
+    #     print('Importing alpha hull package...', file=sys.stderr)
+    #     sys.path.insert(0, '/nfs/polizzi/jchang/python_shared')
+    #     from convex_hull import AlphaHull
+    # if args.use_combsian_contact:
+    #     print('Importing combs2 package...', file=sys.stderr)
+    #     from combs2.design.dataframe import make_df_from_prody
+    #     from combs2.design.functions import make_lig_hbond_dict, make_lig_atom_type_dict
+    #     from combs2.design.contacts import Contact
+
+
     ligand_dons, ligand_accs = parse_ligand_dons_and_accs(args.ligand_dons_and_accs_file)
     print(len(ligand_dons), 'ligand donors:    ', ' '.join(ligand_dons), file=sys.stderr)
     print(len(ligand_accs), 'ligand acceptors: ', ' '.join(ligand_accs), file=sys.stderr)
+    if args.ligand_bun_atom_dict != dict():
+        args.ligand_bun_atom_dict = eval(args.ligand_bun_atom_dict)
+        assert isinstance(args.ligand_bun_atom_dict, dict)
+        print('Ligand custom bun capacities: ', args.ligand_bun_atom_dict, file=sys.stderr)
+    if args.ligand_charged_groups != dict():
+        args.ligand_charged_groups = eval(args.ligand_charged_groups)
+        assert isinstance(args.ligand_charged_groups, dict)
+        print('Ligand charged groups: ', args.ligand_charged_groups, file=sys.stderr)
     if args.ligand_pdb is not None:
         # Since the same ligand pdb is used for all files, read it ahead of time so that
         # the worker threads don't have to keep on opening the file
