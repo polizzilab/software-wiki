@@ -300,20 +300,20 @@ def process_rfaa(
             else:
                 pack_density = np.nan
 
-    df['pdb_name'].append(input_protein.getTitle())
-    df['protein_plddt'].append(protein_plddt)
-    df['ligand_plddt'].append(ligand_plddt)
-    df['rfaa_rmsd'].append(calpha_rmsd)
-    if compute_sc_RMSD:
-        df['rfaa_sc_rmsd'].append(sc_rmsd)
-    if compute_bs_RMSD:
-        df['rfaa_bs_rmsd'].append(bs_rmsd)
-    if eval_pack_density:
-        df['pack_density'].append(pack_density)
-    df['ligand_rmsd'].append(ligand_rmsd)
-    df['input_pdb_path'].append(os.path.abspath(input_pdb_path))
-    df['rfaa_pdb_path'].append(os.path.abspath(rfaa_pdb_path))
-    df['seq'].append(input_protein.protein.ca.getSequence())
+        df['pdb_name'].append(input_protein.getTitle())
+        df['protein_plddt'].append(protein_plddt)
+        df['ligand_plddt'].append(ligand_plddt)
+        df['rfaa_rmsd'].append(calpha_rmsd)
+        if compute_sc_RMSD:
+            df['rfaa_sc_rmsd'].append(sc_rmsd)
+        if compute_bs_RMSD:
+            df['rfaa_bs_rmsd'].append(bs_rmsd)
+        if eval_pack_density:
+            df['pack_density'].append(pack_density)
+        df['ligand_rmsd'].append(ligand_rmsd)
+        df['input_pdb_path'].append(os.path.abspath(input_pdb_path))
+        df['rfaa_pdb_path'].append(os.path.abspath(rfaa_pdb_path))
+        df['seq'].append(input_protein.protein.ca.getSequence())
 
     df = pd.DataFrame(df)
     return df
