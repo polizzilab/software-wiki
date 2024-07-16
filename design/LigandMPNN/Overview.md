@@ -36,7 +36,7 @@ Type: C, Coords [21.683 -3.018  5.961], Mask 1
 Type: O, Coords [22.788 -3.148  6.495], Mask 1
 Type: C, Coords [20.247 -1.273  7.118], Mask 1`
 
-****Example 2: **** Redesign ClpS protein with three fixed residues
+**Example 2:** Redesign ClpS protein with three fixed residues
 
 -With this example, I use LigandMPNN with a temperature of 0.2 to redesign the entire input structure with three residues fixed (Chain A and residues 47 A49 A79) and provide five output structures
 -To run this python command, I first activate Jody's pytorch conda environment on the workstation. **conda activate pytorch**
